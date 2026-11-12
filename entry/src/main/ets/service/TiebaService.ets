@@ -224,6 +224,7 @@ interface ModernPostContentRecord {
   cdn_src?: string;
   big_cdn_src?: string;
   origin_src?: string;
+  imageAspect?: number;
   meme_pic_url?: string;
   meme_pck_id?: number;
   meme_pic_id?: number;
@@ -2868,6 +2869,12 @@ export class TiebaService {
       TiebaService.briefUrl(cands[4]));
   }
 
+  private imageAspectFromPb(content: PbContentMessage): number | undefined {
+    const width = content.width ?? 0;
+    const height = content.height ?? 0;
+    return width > 0 && height > 0 ? width / height : undefined;
+  }
+
   private buildFragmentsFromPbContent(contentList: PbContentMessage[] | undefined): FragmentsResult {
     const fragments: ContentFragment[] = [];
     const textParts: string[] = [];
@@ -2925,7 +2932,8 @@ export class TiebaService {
       } else if (type === 3 || type === 20) {
         // IMAGE：3/20 是图片
         if (imageUrl.length > 0) {
-          fragments.push({ type: ContentFragmentType.IMAGE, text: item.text ?? '', imageUrl });
+          fragments.push({ type: ContentFragmentType.IMAGE, text: item.text ?? '', imageUrl,
+            imageAspect: this.imageAspectFromPb(item) });
           images.push(imageUrl);
         }
         if (item.text !== undefined && item.text.length > 0) {
@@ -3469,6 +3477,7 @@ export class TiebaService {
         cdn_src: content.cdnSrc,
         big_cdn_src: content.bigCdnSrc,
         origin_src: content.originSrc,
+        imageAspect: this.imageAspectFromPb(content),
         meme_pic_url: content.memeInfo?.picUrl ?? content.memeInfo?.thumbnail ?? '',
         meme_pck_id: content.memeInfo?.pckId,
         meme_pic_id: content.memeInfo?.picId
@@ -3841,7 +3850,7 @@ export class TiebaService {
         }
       } else if (type === 3 || type === 20) {
         if (imageUrl.length > 0) {
-          fragments.push({ type: ContentFragmentType.IMAGE, text: item.text ?? '', imageUrl });
+          fragments.push({ type: ContentFragmentType.IMAGE, text: item.text ?? '', imageUrl, imageAspect: item.imageAspect });
           images.push(imageUrl);
         }
         if (item.text !== undefined && item.text.length > 0) {

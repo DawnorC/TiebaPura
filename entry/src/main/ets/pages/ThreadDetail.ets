@@ -921,8 +921,9 @@ struct ThreadDetail {
    */
   private gridAspectByUrl: Map<string, number> = new Map();
   @State mainImageIndex: number = 0;
-  @State mainImageAspect: number = DETAIL_IMAGE_INITIAL_ASPECT;
+  @State mainImageFrameAspect: number = DETAIL_IMAGE_INITIAL_ASPECT;
   @State mainImageWidth: number = 0;
+  private mainImageFrameTid: string = '';
   // ----- 关闭/打断 morph 的滚动跟随（2026-09-27 v2.3）-----
   /** 飞行容器滚动补偿量（vp）：内容滚动 delta 的反向值，让飞行图贴住目标格子 */
   @State morphFollowY: number = 0;
@@ -1155,12 +1156,17 @@ struct ThreadDetail {
     if (this.hasVisibleDetailContent(this.detail, this.floors) && !this.hasVisibleDetailContent(result.detail, result.floors)) {
       return;
     }
-    const previousImage = this.detail?.images[this.mainImageIndex];
-    this.detail = result.detail;
-    if (previousImage !== result.detail.images[this.mainImageIndex]) {
-      this.mainImageIndex = Math.min(this.mainImageIndex, Math.max(0, result.detail.images.length - 1));
-      this.mainImageAspect = this.gridAspectByUrl.get(result.detail.images[this.mainImageIndex]) ?? DETAIL_IMAGE_INITIAL_ASPECT;
+    const images = result.detail.images;
+    if (images.length > 0 && this.mainImageFrameTid !== result.detail.tid) {
+      const firstImage = result.detail.fragments?.find((fragment: ContentFragment): boolean =>
+        fragment.type === ContentFragmentType.IMAGE && fragment.imageUrl === images[0]);
+      const aspect = firstImage?.imageAspect ?? 0;
+      this.mainImageFrameAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : DETAIL_IMAGE_INITIAL_ASPECT;
+      this.mainImageFrameTid = result.detail.tid;
+      this.mainImageIndex = 0;
     }
+    this.mainImageIndex = Math.min(this.mainImageIndex, Math.max(0, images.length - 1));
+    this.detail = result.detail;
     // 缓存首屏显示后，用户可能已翻页。后台第 1 页刷新不能覆盖已追加的楼层和游标。
     if (this.currentPage === 1) {
       this.floors = result.floors;
@@ -4486,13 +4492,6 @@ struct ThreadDetail {
     this.openImagePreview(params, this.inlineImageNodeId(group, index), url);
   }
 
-  private recordMainImageAspect(url: string, aspect: number): void {
-    this.gridAspectByUrl.set(url, aspect);
-    if (this.detail?.images[this.mainImageIndex] === url) {
-      this.mainImageAspect = aspect;
-    }
-  }
-
   private portraitImageHeightLimit(): number {
     return this.pageHeight * DETAIL_PORTRAIT_VIEWPORT_RATIO;
   }
@@ -4512,7 +4511,7 @@ struct ThreadDetail {
               src: url,
               isDark: this.isDark,
               fillFrame: true,
-              onAspect: (aspect: number): void => { this.recordMainImageAspect(url, aspect); }
+              onAspect: (aspect: number): void => { this.gridAspectByUrl.set(url, aspect); }
             })
               .id(this.inlineImageNodeId('main', index))
               .accessibilityText(`查看主帖图片 ${index + 1}`)
@@ -4530,7 +4529,6 @@ struct ThreadDetail {
         .cachedCount(1)
         .onChange((index: number) => {
           this.mainImageIndex = index;
-          this.mainImageAspect = this.gridAspectByUrl.get(images[index]) ?? DETAIL_IMAGE_INITIAL_ASPECT;
         })
 
         if (images.length > 1) {
@@ -4546,7 +4544,7 @@ struct ThreadDetail {
         }
       }
       .width('100%')
-      .height(this.inlineImageHeight(this.mainImageWidth || this.currentWidth, this.mainImageAspect))
+      .height(this.inlineImageHeight(this.mainImageWidth || this.currentWidth, this.mainImageFrameAspect))
 
       if (images.length > 1) {
         Flex({ justifyContent: FlexAlign.Center, wrap: FlexWrap.Wrap }) {

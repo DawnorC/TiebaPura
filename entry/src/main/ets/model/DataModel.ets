@@ -33,6 +33,7 @@ export interface ContentFragment {
   type: ContentFragmentType;
   text: string;
   imageUrl?: string;
+  imageAspect?: number;
   link?: string;   // LINK 类型：真实跳转 URL
 }
 
