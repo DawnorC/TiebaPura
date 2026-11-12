@@ -24,11 +24,12 @@ import { TiebaProtoDecoder } from '../network/TiebaProtoDecoder';
 import { decodePbPageTask, decodeFrsPageTask, decodePbFloorTask } from '../network/DetailDecodeTask';
 import { connection } from '@kit.NetworkKit';
 import { AuthManager } from './AuthManager';
+import { ForumSignStore } from './ForumSignStore';
 import { UsageHabitsManager } from './UsageHabitsManager';
 import { CacheManager } from '../cache/CacheManager';
 import { ImageCache } from '../cache/ImageCache';
 import { PerfTrace } from '../common/PerfTrace';
-import { API, stripHtml, extractImages, extractGroup, decodeHtmlEntities, formatTime, CACHE_KEY, CACHE_TTL } from '../common/Constants';
+import { API, stripHtml, extractImages, extractGroup, decodeHtmlEntities, formatTime, CACHE_KEY, CACHE_TTL, THREAD_COMMENT_PREVIEW_COUNT } from '../common/Constants';
 import { AbstractMessage, PbContentMessage, PostMessage, PostInfoListMessage, SubPostListMessage, FrsPageResponseMessage, ThreadInfoMessage, UserMessage, AgreeMessage, PbPageResponseMessage, PbFloorResponseMessage, GoodClassifyMessage } from '../model/TiebaProtoSchema';
 import {
   ThreadItem, ThreadDetail, FloorItem, CommentItem, SubPostDetail, UserStats, PersonalContentItem,
@@ -44,6 +45,42 @@ export interface BlacklistPermOptions {
   follow?: boolean;
   interact?: boolean;
   chat?: boolean;
+}
+
+export interface ForumSignStatus {
+  signed: boolean;
+  days: number;
+}
+
+interface ForumHeaderCacheEntry {
+  info: ForumHeaderInfo;
+  sign?: ForumSignStatus;
+  signDate?: string;
+  signAccount?: string;
+}
+
+interface ForumGuideSignItem {
+  forum_name?: string;
+  is_sign?: string | number | boolean;
+}
+
+interface ForumGuideSignResponse {
+  error_code?: string | number;
+  like_forum?: ForumGuideSignItem[];
+}
+
+interface ForumLevelSignInfo {
+  day_sign_no?: number | string;
+  high_light_sign_days?: number | string;
+}
+
+interface ForumLevelResponseData {
+  user_forum_info?: ForumLevelSignInfo;
+}
+
+interface ForumLevelSignResponse {
+  error_code?: number | string;
+  data?: ForumLevelResponseData;
 }
 
 interface ModernAuthorRecord {
@@ -148,6 +185,8 @@ interface ModernThreadRecord {
   abstract?: ModernAbstractRecord[] | string;
   forum_info?: ModernForumInfo;
   first_post_content?: string;
+  firstPost?: FragmentsResult;
+  shareCount?: number;
   create_time?: string;
   last_replyer?: string;
   topic_user_name?: string;
@@ -242,6 +281,14 @@ interface ModernApiPayload {
   total_count?: number | string;
 }
 
+export interface ReplyTarget {
+  floorId: string;
+  floor: number;
+  author: string;
+  commentId?: string;
+  replyUserId?: string;
+}
+
 interface WebWriteForm {
   ie: string;
   kw: string;
@@ -255,6 +302,8 @@ interface WebWriteForm {
   __type__?: string;
   tbs: string;
   floor_num?: string;
+  quote_id?: string;
+  repostid?: string;
 }
 
 interface ModernRequestForm {
@@ -424,9 +473,10 @@ export class TiebaService {
   private static instance: TiebaService | null = null;
   /** 服务器时间 - 本地时间 的偏移（毫秒），由 /c/s/login 响应的 time 字段校准 */
   private static serverTimeOffsetMs: number = 0;
-  private cachedForumHeader: ForumHeaderInfo | null = null;
-  /** cachedForumHeader 所属吧名（kw 原样记录）：ThreadList 取头时校验，防止上一个吧的头串显 */
-  private cachedForumHeaderKw: string = '';
+  private cachedForumHeaders: Map<string, ForumHeaderCacheEntry> = new Map();
+  private forumGuideSignKey: string = '';
+  private forumGuideSignExpiresAt: number = 0;
+  private forumGuideSignTask: Promise<Map<string, boolean>> | null = null;
   /** 精选二级分类缓存（最近一次 is_good proto 请求的 forum.good_classify）：精选分类页首屏复用 */
   private cachedGoodClassify: GoodClassifyMessage[] = [];
   /** cachedGoodClassify 所属吧名：跨吧校验，防串显 */
@@ -456,20 +506,145 @@ export class TiebaService {
     return TiebaService.instance;
   }
 
-  /**
-   * 取最近的吧头缓存。传入发起请求的吧名做归属校验：
-   * proto/JSON 只在对应吧的列表请求里写入头信息，若缓存属于其它吧（如连续降级会话里
-   * 先后进了两个吧）必须返回 null，让页面按「头信息缺失」处理，避免把 A 吧的关注态、
-   * 成员数、等级串到 B 吧头上。
-   */
+  /** 并发预取和排序请求按吧名保存吧头。 */
   getCachedForumHeader(forumName: string): ForumHeaderInfo | null {
-    if (this.cachedForumHeader === null) {
-      return null;
+    return this.cachedForumHeaders.get(forumName)?.info ?? null;
+  }
+
+  getCachedForumSignStatus(forumName: string): ForumSignStatus | undefined {
+    const entry = this.cachedForumHeaders.get(forumName);
+    const auth = AuthManager.getInstance();
+    if (auth.isLogin() && entry?.signAccount === auth.getUser()?.userId &&
+      entry?.signDate === ForumSignStore.todayStamp()) {
+      return entry?.sign;
     }
-    if (forumName.length > 0 && this.cachedForumHeaderKw.length > 0 && this.cachedForumHeaderKw !== forumName) {
-      return null;
+    return undefined;
+  }
+
+  async fetchFollowedForumSignStatus(forumName: string, forumId: string = ''): Promise<ForumSignStatus | undefined> {
+    const auth = AuthManager.getInstance();
+    const account: string = auth.getUser()?.userId ?? '';
+    const date: string = ForumSignStore.todayStamp();
+    if (!auth.isLogin() || account.length === 0) {
+      return undefined;
     }
-    return this.cachedForumHeader;
+    const key: string = `${account}:${date}`;
+    let guideStatus: ForumSignStatus | undefined;
+    let task = this.forumGuideSignTask;
+    if (task === null || this.forumGuideSignKey !== key ||
+      (this.forumGuideSignExpiresAt > 0 && Date.now() >= this.forumGuideSignExpiresAt)) {
+      task = this.loadForumGuideSigns();
+      const started: Promise<Map<string, boolean>> = task;
+      this.forumGuideSignTask = started;
+      this.forumGuideSignKey = key;
+      this.forumGuideSignExpiresAt = 0;
+      started.then(() => {
+        if (this.forumGuideSignTask === started) {
+          this.forumGuideSignExpiresAt = Date.now() + 60_000;
+        }
+      }).catch(() => {
+        if (this.forumGuideSignTask === started) {
+          this.forumGuideSignTask = null;
+        }
+      });
+    }
+    try {
+      const statuses = await task;
+      if (auth.getUser()?.userId === account && ForumSignStore.todayStamp() === date) {
+        const signed = statuses.get(forumName.toLowerCase());
+        if (signed === true) {
+          return { signed: true, days: 0 };
+        }
+        if (signed === false) {
+          guideStatus = { signed: false, days: 0 };
+        }
+      }
+    } catch (e) {
+      // 保留未知状态，避免把读取失败显示成未签到。
+    }
+    if (/^[1-9]\d*$/.test(forumId) && auth.getUser()?.userId === account && ForumSignStore.todayStamp() === date) {
+      try {
+        const status = await this.loadForumLevelSignStatus(forumId, account);
+        if (status !== undefined && auth.getUser()?.userId === account && ForumSignStore.todayStamp() === date) {
+          return status;
+        }
+      } catch (e) {
+        // 两个只读查询都未返回状态时，继续保留当前展示。
+      }
+    }
+    return auth.getUser()?.userId === account && ForumSignStore.todayStamp() === date ? guideStatus : undefined;
+  }
+
+  /** 吧页缺少个人签到信息时，读取关注吧的签到标记。 */
+  private async loadForumGuideSigns(): Promise<Map<string, boolean>> {
+    const form: Record<string, string> = {
+      'sort_type': '3',
+      'call_from': '3'
+    };
+    const headers: Record<string, string> = {
+      'Subapp-Type': 'hybrid',
+      'Accept': 'application/json',
+      'Referer': `${TIEBA_BASE}/`
+    };
+    const response = await this.withTimeout(
+      HttpClient.postForm(`${TIEBA_BASE}/c/f/forum/forumGuide`, form, headers), 6000, 'forum sign status');
+    const guide = JSON.parse(response) as ForumGuideSignResponse;
+    if (Number(guide.error_code) !== 0 || !Array.isArray(guide.like_forum)) {
+      throw new Error('关注吧签到状态不可用');
+    }
+    const statuses: Map<string, boolean> = new Map();
+    for (const forum of guide.like_forum) {
+      const name: string = (forum.forum_name ?? '').trim().toLowerCase();
+      const sign: string = `${forum.is_sign ?? ''}`;
+      if (name.length > 0 && (sign === '1' || sign === '0' || sign === 'true' || sign === 'false')) {
+        statuses.set(name, sign === '1' || sign === 'true');
+      }
+    }
+    return statuses;
+  }
+
+  private async loadForumLevelSignStatus(forumId: string, account: string): Promise<ForumSignStatus | undefined> {
+    const auth = AuthManager.getInstance();
+    const cuid = await this.resolveClientCuid();
+    if (auth.getUser()?.userId !== account) {
+      return undefined;
+    }
+    const form: Record<string, string> = {};
+    form.BDUSS = auth.getBduss();
+    form._client_version = PB_CLIENT_VERSION;
+    form.forum_id = forumId;
+    form.friend_portrait = '';
+    form.sign = await this.signTiebaForm(form);
+    const response = await this.withTimeout(HttpClient.postForm(
+      'https://tiebac.baidu.com/c/f/forum/getUserForumLevelInfo', form, this.buildClientApiHeaders(cuid, account)),
+      6000, 'forum user sign status');
+    const data = JSON.parse(response) as ForumLevelSignResponse;
+    const info = data.data?.user_forum_info;
+    const rank: string = `${info?.day_sign_no ?? ''}`;
+    if (Number(data.error_code) !== 0 || !/^\d+$/.test(rank)) {
+      return undefined;
+    }
+    const signed: boolean = Number(rank) > 0;
+    const days: number = signed ? Math.max(0, Number(info?.high_light_sign_days) || 0) : 0;
+    return { signed: signed, days: days };
+  }
+
+  private cacheForumHeader(forumName: string, info: ForumHeaderInfo, sign?: ForumSignStatus,
+    signAccount?: string, signDate?: string): void {
+    const previous = this.cachedForumHeaders.get(forumName);
+    this.cachedForumHeaders.delete(forumName);
+    this.cachedForumHeaders.set(forumName, {
+      info: info,
+      sign: sign ?? previous?.sign,
+      signAccount: signAccount ?? previous?.signAccount,
+      signDate: signDate ?? previous?.signDate
+    });
+    if (this.cachedForumHeaders.size > 32) {
+      const oldest = this.cachedForumHeaders.keys().next();
+      if (!oldest.done) {
+        this.cachedForumHeaders.delete(oldest.value);
+      }
+    }
   }
 
   /**
@@ -554,11 +729,16 @@ export class TiebaService {
       return isNaN(n) ? 0 : n;
     };
     const name = (forum.name ?? '').toString().trim();
-    this.cachedForumHeader = {
+    const previous = this.getCachedForumHeader(requestKw);
+    this.cacheForumHeader(requestKw, {
       forumId: `${forum.id ?? ''}`,
       forumName: name.length > 0 ? name : requestKw,
       avatar: this.normalizeForumAvatar((forum.avatar ?? '').toString()),
       bannerUrl: '',
+      headerImage: previous?.headerImage,
+      headerImageColor: previous?.headerImageColor,
+      headerColor: previous?.headerColor,
+      darkHeaderColor: previous?.darkHeaderColor,
       slogan: (forum.slogan ?? '').toString(),
       memberCount: toNum(forum.member_num),
       threadCount: toNum(forum.thread_num),
@@ -569,8 +749,7 @@ export class TiebaService {
       levelupScore: toNum(forum.levelup_score),
       isLike: toNum(forum.is_like) === 1,
       hasFrsStar: toNum(forum.has_frs_star) === 1,
-    };
-    this.cachedForumHeaderKw = requestKw;
+    });
   }
 
   /**
@@ -1200,9 +1379,9 @@ export class TiebaService {
         scr_h: '800',
         scr_w: '360',
       });
-      // modern JSON 同样带 forum 对象（含 is_like/成员数/等级）：proto 被风控降级到本路径时
-      // 若不提取，页面 forumInfo 恒 null → 签到钮永远显「未签到」且点不了关注
-      this.cacheForumHeaderFromModern(payload.forum, forumName);
+      if (page <= 1) {
+        this.cacheForumHeaderFromModern(payload.forum, forumName);
+      }
       const modernList = this.parseModernThreads(payload, page, forumName);
       if (modernList.list.length > 0) {
         if (isGoodMode) {
@@ -1404,6 +1583,9 @@ export class TiebaService {
 
   private async requestForumThreadsProto(forumName: string, page: number, sortType: number, isGood: boolean, enrichAuthors: boolean = true,
     goodClassId: number = 0, isPrefetch: boolean = false): Promise<PagedResult<ThreadItem>> {
+    const auth = AuthManager.getInstance();
+    const signAccount: string = auth.getUser()?.userId ?? '';
+    const signDate: string = ForumSignStore.todayStamp();
     const common = ProtoSchema.commonRequest(new Map<string, string | number>([
       ['_client_type', 2],
       ['_client_version', '12.64.1.1'],
@@ -1429,6 +1611,10 @@ export class TiebaService {
     if (goodClassId > 0) {
       frsFields.set('cid', goodClassId);
     }
+    if (page <= 1) {
+      frsFields.set('is_newfrs', 1);
+      frsFields.set('withcal', 1);
+    }
     const data = ProtoSchema.frsPageRequest(frsFields, common);
     const binary = await this.withTimeout(
       HttpClient.postProtoMultipart('https://c.tieba.baidu.com/c/f/frs/page?cmd=301001', data, {
@@ -1448,8 +1634,21 @@ export class TiebaService {
     if (errorCode !== 0) {
       throw new Error(decoded.error?.userMsg ?? decoded.error?.errorMsg ?? `贴吧列表接口错误 ${errorCode}`);
     }
-    this.cachedForumHeader = this.extractForumHeaderInfo(decoded, forumName);
-    this.cachedForumHeaderKw = forumName;
+    if (page <= 1 && decoded.data?.forum) {
+      const header = this.extractForumHeaderInfo(decoded, forumName);
+      const signUser = decoded.data.forum.signUser;
+      const code: number = signUser?.isSignIn ?? 0;
+      if (signAccount.length > 0 && signAccount === auth.getUser()?.userId && signUser &&
+        (code === 0 || code === 1) && ((signUser.userId ?? 0) === 0 || signUser.userId === Number(signAccount)) &&
+        (signUser.isSignIn !== undefined || (signUser.userId ?? 0) > 0)) {
+        this.cacheForumHeader(forumName, header, {
+          signed: code === 1,
+          days: code === 1 ? Math.max(0, signUser.consecutiveDays ?? 0) : 0
+        }, signAccount, signDate);
+      } else {
+        this.cacheForumHeader(forumName, header);
+      }
+    }
     // 精选分类缓存：is_good 请求的响应 forum.good_classify（field 21）随请求自然落地，
     // 精选分类页首屏一次请求两用（列表 + 分类清单）。非精选请求不动缓存。
     if (isGood) {
@@ -1529,11 +1728,21 @@ export class TiebaService {
   private extractForumHeaderInfo(decoded: FrsPageResponseMessage, fallbackName: string): ForumHeaderInfo {
     const forum = decoded.data?.forum;
     const avatar: string = this.normalizeForumAvatar((forum?.avatar ?? '').toString());
+    const art = decoded.data?.headerArt;
+    const url: string = (art?.url ?? '').trim();
+    const headerImage: string = url.startsWith('//') ? `https:${url}` : url.replace(/^http:\/\//i, 'https://');
+    const day = forum?.themeColor?.day;
+    const dark = forum?.themeColor?.dark ?? forum?.themeColor?.night;
     return {
       forumId: `${forum?.id ?? ''}`,
       forumName: (forum?.name ?? fallbackName).toString(),
       avatar: avatar,
       bannerUrl: (forum?.fShareImg ?? '').toString(),
+      headerImage: headerImage.startsWith('https://') ? headerImage : '',
+      headerImageColor: this.normalizeForumHeaderColor(art?.color),
+      headerColor: this.normalizeForumHeaderColor(day?.commonColor),
+      darkHeaderColor: this.normalizeForumHeaderColor(dark?.darkColor) ||
+        this.normalizeForumHeaderColor(dark?.commonColor) || this.normalizeForumHeaderColor(day?.darkColor),
       slogan: (forum?.slogan ?? '').toString(),
       memberCount: forum?.memberNum ?? 0,
       threadCount: forum?.threadNum ?? 0,
@@ -1545,6 +1754,11 @@ export class TiebaService {
       isLike: (forum?.isLike ?? 0) === 1,
       hasFrsStar: (forum?.hasFrsStar ?? 0) === 1,
     };
+  }
+
+  private normalizeForumHeaderColor(raw: string | undefined): string {
+    const hex: string = (raw ?? '').trim().replace(/^#/, '');
+    return /^[\da-f]{6}$/i.test(hex) ? `#${hex}` : '';
   }
 
   // ---- 帖子详情内存缓存（秒开：重复打开先显示缓存，后台静默刷新） ----
@@ -1748,7 +1962,7 @@ export class TiebaService {
     if (this.pendingThreadDetailPrefetch.has(key)) {
       return; // 已在途，防重复请求
     }
-    const task: Promise<ThreadDetailResult | undefined> = this.fetchThreadDetail(normalizedTid, 1, 0, false, forumId, 3, 0, '', undefined, true)
+    const task: Promise<ThreadDetailResult | undefined> = this.fetchThreadDetail(normalizedTid, 1, 0, false, forumId, THREAD_COMMENT_PREVIEW_COUNT, 0, '', undefined, true)
       .then((result: ThreadDetailResult): Promise<ThreadDetailResult | undefined> => {
         // prefetched=true：预取项在逐出时优先级最低，先把"押注"让给真访问
         this.putThreadDetailCache(key, result, true);
@@ -3060,7 +3274,9 @@ export class TiebaService {
     const decodedForumName: string = decoded.data?.thread?.forumName ?? decoded.data?.forum?.name ?? decoded.data?.displayForum?.name ?? '';
     const decodedForumId: string = `${decoded.data?.thread?.forumId ?? decoded.data?.forum?.id ?? decoded.data?.displayForum?.id ?? forumId}`;
     const decodedForumAvatar: string = (decoded.data?.forum?.avatar ?? decoded.data?.displayForum?.avatar ?? '').toString();
-    const firstDecodedPost: PostMessage | undefined = decoded.data?.postList?.[0];
+    const firstPostId: number | undefined = decoded.data?.thread?.firstPostId;
+    const firstDecodedPost: PostMessage | undefined = decoded.data?.postList?.find((post: PostMessage): boolean =>
+      post.floor === 1 || (firstPostId !== undefined && firstPostId > 0 && post.id === firstPostId));
     const decodedThreadAuthor = decoded.data?.thread?.author ?? firstDecodedPost?.author;
     const decodedUsers: ModernAuthorRecord[] = (decoded.data?.userList ?? []).map((user: UserMessage): ModernAuthorRecord => ({
       id: user.id,
@@ -3111,6 +3327,9 @@ export class TiebaService {
         tid,
         id: `${decoded.data?.thread?.id ?? tid}`,
         title: decoded.data?.thread?.title ?? tid,
+        post_id: firstPostId ?? firstDecodedPost?.id,
+        firstPost: this.buildFragmentsFromPbContent(decoded.data?.thread?.firstPostContent),
+        shareCount: decoded.data?.thread?.shareNum,
         reply_num: decoded.data?.thread?.replyNum,
         forum_info: { name: decodedForumName, id: decodedForumId, avatar: decodedForumAvatar },
         agree: hasMergedAgree ? this.mapAgree(
@@ -3327,6 +3546,7 @@ export class TiebaService {
         images: mobile.detail.images,
         fragments: mobile.detail.fragments ?? [],
         likeCount: mobile.detail.likeCount ?? web.detail.likeCount ?? 0,
+        shareCount: mobile.detail.shareCount ?? web.detail.shareCount,
         isLiked: mobile.detail.isLiked ?? web.detail.isLiked ?? false,
         replyNum: mobile.detail.replyNum,
         createTime: mobile.detail.createTime,
@@ -3395,7 +3615,7 @@ export class TiebaService {
       const images: string[] = floorContent.images;
       const fragments: ContentFragment[] = floorContent.fragments;
       const rawFloor: number = Number(record.floor ?? record.floor_num ?? record.floorNum ?? record.post_no ?? record.postNo ?? 0);
-      const floor: number = rawFloor > 0 ? rawFloor : index + 1;
+      const floor: number = rawFloor > 0 ? rawFloor : (page - 1) * (Number(payload.page_size) || 30) + index + 1;
       // 楼层作者昵称：仅 profile 实时接口确认的权威昵称优先采用，保证与列表页一致
       const rawFloorAuthorId: string = `${record.author_id ?? record.author?.id ?? ''}`.trim();
       const cachedFloorName: string | undefined = (rawFloorAuthorId.length > 0 && this.authorNickProfileConfirmed.has(rawFloorAuthorId))
@@ -3469,7 +3689,9 @@ export class TiebaService {
 
     // PbPage 的 post_list 包含首楼；普通详情回复区只保留第 2 楼及以后。
     // 楼中楼详情带 parentPid 时，即使接口只返回当前主楼，也必须保留它作为父楼展示。
-    const firstFloor: FloorItem | undefined = parsed.find((floor: FloorItem) => floor.floor === 1) ?? parsed[0];
+    const firstPostId: string = `${thread?.post_id ?? ''}`;
+    const firstFloor: FloorItem | undefined = parsed.find((floor: FloorItem): boolean =>
+      floor.floor === 1 || (firstPostId.length > 0 && floor.floorId === firstPostId));
     const normalizedParentPid: string = parentPid.trim();
     const floors: FloorItem[] = normalizedParentPid.length > 0
       ? parsed.filter((floor: FloorItem): boolean => floor.floorId === normalizedParentPid || floor.floorId === `${Number(normalizedParentPid)}`)
@@ -3495,7 +3717,7 @@ export class TiebaService {
     console.info(`[AUTHORDIAG] detail: tid=${tid} author=[${resolvedAuthor}] authorId=${resolvedAuthorId || '(空)'} threadAuthor=${JSON.stringify({ name: thread?.author?.name, name_show: thread?.author?.name_show, id: thread?.author?.id })} userList0..4=${(payload.user_list ?? []).slice(0, 5).map((u: ModernAuthorRecord): string => `${u.id ?? u.uid ?? '?'}=${u.name_show ?? u.nameShow ?? '(无名)'}(${u.name ?? ''})`).join('|')} firstFloorAuthor=[${firstFloor?.author ?? ''}]`);
     const detail: ThreadDetail = {
       tid,
-      postId: `${firstFloor?.floorId ?? ''}`,
+      postId: firstFloor?.floorId ?? firstPostId,
       title,
       forumName,
       forumId: thread?.forum_info?.id ?? payload.forum?.id ?? '',
@@ -3512,20 +3734,21 @@ export class TiebaService {
         clampLike(Number(thread?.agree_num ?? 0)),
         0
       ),
+      shareCount: thread?.shareCount,
       // 全兼容isLiked：首楼兜底 / thread嵌套 / thread顶层独立 / agreeType → OR逻辑
       isLiked: (firstFloor?.isLiked ?? false)
         || Number(thread?.agree?.hasAgree ?? thread?.agree?.has_agree ?? 0) === 1
         || Number(thread?.hasAgree ?? thread?.has_agree ?? 0) === 1
         || Number(thread?.agree?.agreeType ?? thread?.agree?.agree_type ?? thread?.agreeType ?? thread?.agree_type ?? 0) > 0,
-      content: firstFloor?.contentText ?? thread?.first_post_content ?? '',
-      contentText: firstFloor?.contentText ?? thread?.first_post_content ?? '',
-      images: firstFloor?.images ?? [],
-      fragments: firstFloor?.fragments ?? [],
+      content: firstFloor?.contentText ?? thread?.firstPost?.text ?? thread?.first_post_content ?? '',
+      contentText: firstFloor?.contentText ?? thread?.firstPost?.text ?? thread?.first_post_content ?? '',
+      images: firstFloor?.images ?? thread?.firstPost?.images ?? [],
+      fragments: firstFloor?.fragments ?? thread?.firstPost?.fragments ?? [],
       replyNum: thread?.reply_num !== undefined ? Number(thread.reply_num) : parsed.length,
       createTime: thread?.create_time ?? thread?.last_time ?? '',
       level: Number(thread?.author?.levelId ?? firstFloor?.level ?? 0) || 0,
       page,
-      totalPage: Number(payload.total_page ?? 0) > 0 ? Number(payload.total_page) : (payload.has_more === '1' ? page + 1 : page),
+      totalPage: Math.max(Number(payload.total_page) || 0, payload.has_more === '1' ? page + 1 : page),
     };
     return { detail, floors };
   }
@@ -4592,14 +4815,21 @@ export class TiebaService {
   }
 
   /**
-   * 回复主题：模拟网页端 /f/commit/post/add。
+   * 主帖和楼层使用网页表单，指定楼中楼评论使用带子回复 ID 的请求。
    */
-  async publishReply(forumName: string, tid: string, content: string, forumId: string = '', floorNum: string = ''): Promise<PublishResult> {
+  async publishReply(forumName: string, tid: string, content: string, forumId: string = '', target: ReplyTarget | null = null): Promise<PublishResult> {
     this.assertWriteReady(forumName, '', content);
     if (tid.trim().length === 0) {
       throw new Error('缺少帖子 ID，无法回帖');
     }
+    const postIdPattern = /^[1-9][0-9]*$/;
+    if (target !== null && !postIdPattern.test(target.floorId)) {
+      throw new Error('缺少有效楼层 ID，无法回复该楼层');
+    }
     const fid = await this.resolveForumId(forumName, forumId);
+    if (target?.commentId !== undefined) {
+      return this.publishNestedReply(forumName, tid.trim(), content.trim(), fid, target);
+    }
     const form: WebWriteForm = {
       ie: 'utf-8',
       kw: forumName,
@@ -4610,10 +4840,44 @@ export class TiebaService {
       anonymous: '0',
       tbs: await this.fetchTbs(),
     };
-    if (floorNum.trim().length > 0) {
-      form.floor_num = floorNum.trim();
+    if (target !== null) {
+      form.quote_id = target.floorId;
+      form.repostid = target.floorId;
+      if (target.floor > 0) {
+        form.floor_num = String(target.floor);
+      }
     }
     return this.submitWrite(`${TIEBA_BASE}/f/commit/post/add`, form, '回帖');
+  }
+
+  private async publishNestedReply(forumName: string, tid: string, content: string, fid: string,
+    target: ReplyTarget): Promise<PublishResult> {
+    const commentId = target.commentId ?? '';
+    const userId = target.replyUserId ?? '';
+    if (!/^[1-9][0-9]*$/.test(commentId) || !/^[1-9][0-9]*$/.test(userId)) {
+      throw new Error('缺少有效的楼中楼评论或用户 ID，无法定向回复');
+    }
+    const tbs = await this.fetchTbs();
+    const common = ProtoSchema.commonRequest(new Map<string, string | number>([
+      ['_client_type', 2], ['_client_version', PB_CLIENT_VERSION],
+      ['BDUSS', AuthManager.getInstance().getBduss()], ['tbs', tbs]
+    ]));
+    const request = ProtoSchema.addSubPostReplyRequest(tid, fid, forumName, content, tbs,
+      target.floorId, commentId, userId, common);
+    const binary = await HttpClient.postProtoMultipart('https://tiebac.baidu.com/c/c/post/add?cmd=309731&format=protobuf', request, {
+      'User-Agent': PB_USER_AGENT,
+      'Accept': 'application/octet-stream',
+      'X-BD-DATA-TYPE': 'protobuf',
+      'Client-Type': '2',
+      'Charset': 'UTF-8',
+      'Referer': `${TIEBA_BASE}/`,
+    });
+    const response = TiebaProtoDecoder.decodeAddPostResponse(binary);
+    if (response.errorCode !== 0) {
+      throw new Error(response.userMsg || response.errorMsg ||
+        (response.errorCode === undefined ? '回复结果未确认，请先查看楼中楼' : '楼中楼回复失败'));
+    }
+    return { success: true, message: '回复成功', tid };
   }
 
   private assertWriteReady(forumName: string, title: string, content: string): void {
@@ -4648,9 +4912,15 @@ export class TiebaService {
     } catch (e) {
       throw new Error(`${actionName}响应格式异常，可能触发了验证码或贴吧风控`);
     }
-    const code = this.readNumber(payload, ['no', 'err_code', 'errno', 'error_code']);
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error(`${actionName}结果未确认，请先查看帖子是否已发布`);
+    }
+    const codeText = this.readString(payload, ['no', 'err_code', 'errno', 'error_code', 'error_no']).trim();
     const message = this.readString(payload, ['error', 'errmsg', 'error_msg', 'message']);
-    if (code !== 0) {
+    if (codeText.length === 0 || !Number.isFinite(Number(codeText))) {
+      throw new Error(message.length > 0 ? message : `${actionName}结果未确认，请先查看帖子是否已发布`);
+    }
+    if (Number(codeText) !== 0) {
       throw new Error(message.length > 0 ? message : `${actionName}失败，请稍后重试`);
     }
     const tid = this.readString(payload, ['tid', 'thread_id']);
@@ -4675,6 +4945,8 @@ export class TiebaService {
     this.appendWritePair(pairs, '__type__', form.__type__);
     this.appendWritePair(pairs, 'tbs', form.tbs);
     this.appendWritePair(pairs, 'floor_num', form.floor_num);
+    this.appendWritePair(pairs, 'quote_id', form.quote_id);
+    this.appendWritePair(pairs, 'repostid', form.repostid);
     return pairs.join('&');
   }
 
@@ -7550,7 +7822,6 @@ export class TiebaService {
           'Accept': 'application/json, text/plain, */*',
           'User-Agent': 'bdtb for Android 12.41.7.1',
         });
-        console.info(`[TBS] /c/s/login response: ${loginResponse.substring(0, 300)}`);
       } catch (e) {
         console.error(`[TBS] /c/s/login network error: ${(e as Error).message}`);
       }
@@ -7584,8 +7855,8 @@ export class TiebaService {
           if (err.message.includes('登录凭证获取失败') || err.message.includes('BDUSS 已失效')) {
             throw err;
           }
-          console.error(`[TBS] /c/s/login parse error: ${err.message}`);
-          throw new Error(`登录凭证解析失败: ${err.message}`);
+          console.error('[TBS] /c/s/login parse error');
+          throw new Error('登录凭证解析失败');
         }
       }
       throw new Error('登录凭证网络请求失败，请检查网络连接');

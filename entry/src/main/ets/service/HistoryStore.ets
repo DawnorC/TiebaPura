@@ -24,6 +24,14 @@ import { PersonalContentItem } from '../model/DataModel';
 /** 浏览历史上限（沿用旧实现的 50 条） */
 const HISTORY_MAX_ITEMS: number = 50;
 
+/** 「最近进入」足迹项（独立于帖子浏览历史，进入吧主页即记录） */
+export interface ForumVisitItem {
+  name: string;
+  forumId: string;
+  avatar: string;
+  lastVisit: number;
+}
+
 /**
  * 「我的 → 浏览历史」的本地记录仓（2026-09-23）。
  *
@@ -72,6 +80,129 @@ export class HistoryStore {
       return Array.isArray(parsed) ? parsed : [];
     } catch (e) {
       return [];
+    }
+  }
+
+  // ===== 「最近进入」足迹：独立于帖子浏览历史，进入吧主页即记录 =====
+  private visitCacheKey(accountId: string): string {
+    return `${CACHE_KEY.RECENT_FORUM_VISIT}_${accountId}`;
+  }
+
+  /** 记录一次「进入吧」足迹（fire-and-forget）：按吧名去重、置顶、上限 HISTORY_MAX_ITEMS。 */
+  recordForumVisit(name: string, forumId: string, avatar: string): Promise<void> {
+    this.writeChain = this.writeChain
+      .then((): Promise<void> => this.doRecordForumVisit(name, forumId, avatar))
+      .catch((): void => {
+      });
+    return this.writeChain;
+  }
+
+  private async doRecordForumVisit(name: string, forumId: string, avatar: string): Promise<void> {
+    const acc: string = this.currentAccountId();
+    const fname: string = `${name ?? ''}`.trim();
+    if (acc.length === 0 || fname.length === 0) {
+      return;
+    }
+    const stored: ForumVisitItem[] = await this.readVisits(acc);
+    let effectiveAvatar: string = `${avatar ?? ''}`.trim();
+    // 进吧先记空头像、吧头信息后到再补记的时序下：本次入参头像为空而旧足迹已带头像时保留旧头像，
+    // 防止重复进入同一吧（重进 / 切排序再触发记录）把已补齐的头像冲回空串。
+    if (effectiveAvatar.length === 0) {
+      for (const old of stored) {
+        if (old.name === fname && (old.avatar ?? '').length > 0) {
+          effectiveAvatar = old.avatar ?? '';
+          break;
+        }
+      }
+    }
+    const next: ForumVisitItem[] = [
+      { name: fname, forumId: `${forumId ?? ''}`.trim(), avatar: effectiveAvatar, lastVisit: Date.now() }
+    ];
+    for (const old of stored) {
+      if (old.name === fname) {
+        continue;
+      }
+      next.push(old);
+    }
+    await CacheManager.getInstance().put(this.visitCacheKey(acc), JSON.stringify(next.slice(0, HISTORY_MAX_ITEMS)));
+  }
+
+  /** 回写某吧「最近进入」足迹的头像（足迹在、头像后补的场景：按名网络拉取成功后回写，防下次重建被空值冲掉）。 */
+  updateForumVisitAvatar(name: string, avatar: string): Promise<void> {
+    this.writeChain = this.writeChain
+      .then((): Promise<void> => this.doUpdateForumVisitAvatar(name, avatar))
+      .catch((): void => {
+      });
+    return this.writeChain;
+  }
+
+  private async doUpdateForumVisitAvatar(name: string, avatar: string): Promise<void> {
+    const acc: string = this.currentAccountId();
+    const fname: string = `${name ?? ''}`.trim();
+    const fa: string = `${avatar ?? ''}`.trim();
+    if (acc.length === 0 || fname.length === 0 || fa.length === 0) {
+      return;
+    }
+    const stored: ForumVisitItem[] = await this.readVisits(acc);
+    for (let i = 0; i < stored.length; i++) {
+      if (stored[i].name === fname) {
+        if ((stored[i].avatar ?? '') !== fa) {
+          stored[i] = {
+            name: stored[i].name,
+            forumId: stored[i].forumId,
+            avatar: fa,
+            lastVisit: stored[i].lastVisit ?? 0
+          };
+          await CacheManager.getInstance().put(this.visitCacheKey(acc), JSON.stringify(stored));
+        }
+        return;
+      }
+    }
+  }
+
+  private async readVisits(accountId: string): Promise<ForumVisitItem[]> {
+    const raw = await CacheManager.getInstance().get(this.visitCacheKey(accountId));
+    if (raw === undefined) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(raw) as ForumVisitItem[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /** 读取「最近进入」足迹（按 lastVisit 倒序）。 */
+  async loadForumVisits(): Promise<ForumVisitItem[]> {
+    const acc: string = this.currentAccountId();
+    if (acc.length === 0) {
+      return [];
+    }
+    const stored: ForumVisitItem[] = await this.readVisits(acc);
+    stored.sort((a: ForumVisitItem, b: ForumVisitItem): number => (b.lastVisit ?? 0) - (a.lastVisit ?? 0));
+    return stored;
+  }
+
+  /** 删除某个吧的「最近进入」足迹。 */
+  removeForumVisit(name: string): Promise<void> {
+    this.writeChain = this.writeChain
+      .then((): Promise<void> => this.doRemoveForumVisit(name))
+      .catch((): void => {
+      });
+    return this.writeChain;
+  }
+
+  private async doRemoveForumVisit(name: string): Promise<void> {
+    const acc: string = this.currentAccountId();
+    const fname: string = `${name ?? ''}`.trim();
+    if (acc.length === 0 || fname.length === 0) {
+      return;
+    }
+    const stored: ForumVisitItem[] = await this.readVisits(acc);
+    const next: ForumVisitItem[] = stored.filter((v: ForumVisitItem): boolean => v.name !== fname);
+    if (next.length !== stored.length) {
+      await CacheManager.getInstance().put(this.visitCacheKey(acc), JSON.stringify(next));
     }
   }
 

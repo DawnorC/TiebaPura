@@ -16,10 +16,15 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop,
+  DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { TiebaService } from '../service/TiebaService';
 import { AuthManager } from '../service/AuthManager';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 /**
  * 屏蔽设置页：UI 与 Settings.ets 设置页统一（顶栏 44vp + SettingItem 卡片行 + 沉浸光感）。
  * 首个设置项为「黑名单管理」，后续可扩展其它屏蔽项。
@@ -27,6 +32,10 @@ import { AuthManager } from '../service/AuthManager';
 @Entry
 @Component
 struct ShieldSettings {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  /** 页面边距（左右留白，实时同步；16=默认，0=贴边） */
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   @State isDark: boolean = isDarkMode();
   @State blackCount: number = -1;   // -1 = 未加载成功（接口待批 A 接入，失败静默降级为占位文案）
   @StorageLink('fontScale') fontScale: number = 1.0;
@@ -76,7 +85,7 @@ struct ShieldSettings {
           )
         }
         .width('100%')
-        .padding({ left: Spacing.lg, right: Spacing.lg, bottom: Spacing.xl })
+        .padding({ left: this.pageMargin, right: this.pageMargin, bottom: Spacing.xl })
       }
       .scrollBar(BarState.Off)
       .scrollable(ScrollDirection.Vertical)
@@ -86,8 +95,8 @@ struct ShieldSettings {
       .clip(false)
       .align(Alignment.TopStart)
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .overlay(this.BottomFadeOverlay())
-      .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+      .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+      .overlay(() => { TopGlassVeil() })
 
       // 悬浮沉浸顶栏（透明底，内容可穿过；参数同 Settings.ets）
       this.TopBar()
@@ -128,20 +137,6 @@ struct ShieldSettings {
     .zIndex(14)
   }
 
-  /** 渐变沉浸遮罩：顶部渐显（同 Settings.ets / Index「我的」范式） */
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', tabletTopFadeStop(98)], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
-  }
-
   @Builder
   SettingItem(icon: Resource, title: string, subtitle: string, action: () => void) {
     Row({ space: Spacing.md }) {
@@ -168,7 +163,7 @@ struct ShieldSettings {
     .width('100%')
     .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.md, bottom: Spacing.md })
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(Radius.lg)
+    .borderRadius(Radius.lg * this.cardRadiusScale)
     .onClick(() => action())
   }
 }

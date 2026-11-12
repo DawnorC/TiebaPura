@@ -34,11 +34,18 @@ import {
 import { FollowFeedStore, POOL_HIGH, sortThreadsByTimeDesc } from '../service/FollowFeedStore';
 import { HistoryStore } from '../service/HistoryStore';
 import { FollowItem, PagedResult, ThreadItem, PersonalContentItem } from '../model/DataModel';
-import { Theme, Spacing, Radius, Breakpoint, CARD_COLUMNS_KEY, isDarkMode, ImmBlur, ImmMaterial, fs, isWideBarDevice, isLargeFoldDevice, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns, isLargeScreenForm, isWideBarFullscreen } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, Breakpoint, CARD_COLUMNS_KEY, isDarkMode, ImmBlur, ImmMaterial, fs,
+  isWideBarDevice, isLargeFoldDevice, isWideFormDevice as detectWideFormDevice, readColumnMode,
+  overrideColumns, isLargeScreenForm, isWideBarFullscreen,
+  DEFAULT_PAGE_MARGIN
+} from '../common/Theme';
 import { ErrorView, EmptyView, ThreadCard, ThreadItemData, ThreadSharePayload } from '../components/CommonComponents';
 import { ThreadListSkeleton } from '../components/Skeleton';
 import { PerfTrace } from '../common/PerfTrace';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 interface FollowSets {
   ids: Set<string>;
   names: Set<string>;
@@ -187,6 +194,9 @@ const HOME_FADE_MAX: number = 180;
  */
 @Component
 export struct HomeTab {
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  // 页面边距（左右留白，随设置页实时同步；16=默认，0=贴边）
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   /** 首页搜索入口：宿主切换到收藏 Tab（搜索在收藏页本地过滤） */
   onOpenFavorite: () => void = () => {
   };
@@ -2592,7 +2602,7 @@ export struct HomeTab {
             .cachedCount(Math.max(5, this.homeColumns() * 2))
             .columnsGap(Spacing.md)
             .rowsGap(Spacing.md)
-            .padding({ left: Spacing.lg, right: Spacing.lg })
+            .padding({ left: this.pageMargin, right: this.pageMargin })
             .layoutWeight(1)
             .clip(false)
             .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
@@ -2686,7 +2696,7 @@ export struct HomeTab {
           }
           .width('100%')
           .layoutWeight(1)
-          .padding({ left: Spacing.lg, right: Spacing.lg })
+          .padding({ left: this.pageMargin, right: this.pageMargin })
           .clip(false)
           .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
           .scrollBar(BarState.Off)
@@ -2786,7 +2796,7 @@ export struct HomeTab {
             .cachedCount(Math.max(5, this.homeColumns() * 2))
             .columnsGap(Spacing.md)
             .rowsGap(Spacing.md)
-            .padding({ left: Spacing.lg, right: Spacing.lg })
+            .padding({ left: this.pageMargin, right: this.pageMargin })
             .layoutWeight(1)
             .clip(false)
             .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
@@ -2879,7 +2889,7 @@ export struct HomeTab {
           }
           .width('100%')
           .layoutWeight(1)
-          .padding({ left: Spacing.lg, right: Spacing.lg })
+          .padding({ left: this.pageMargin, right: this.pageMargin })
           .clip(false)
           .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
           .scrollBar(BarState.Off)
@@ -2911,27 +2921,6 @@ export struct HomeTab {
     .layoutWeight(1)
     .backgroundColor(Color.Transparent)
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-  }
-
-  /**
-   * 顶部满宽渐显带（2026-09-29 定稿：进吧页 ForumsTab.TopFadeBand 逐项照搬）：
-   * 背景色渐变条挂页面层（盖列表内容），高 108 = 顶栏（状态栏让位 + 按钮行 + 呼吸）；
-   * 渐变自顶部线性、无全实段（否则内容到顶栏会被"硬切"）；不与标题栏沉浸隐藏联动——
-   * 标题自动隐藏时照常保留（用户指定），行为与进吧页完全一致。
-   */
-  @Builder
-  TopFadeBand() {
-    Column()
-      .width('100%')
-      .height(HOME_TITLE_BAR_HEIGHT)
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [
-          [Theme.bg(this.isDark), 0.0],
-          [this.isDark ? '#00101114' : '#00F2F4F7', 1.0]
-        ]
-      })
-      .hitTestBehavior(HitTestMode.None)
   }
 
   @Builder
@@ -2991,7 +2980,7 @@ export struct HomeTab {
       .onClick(() => { this.openSearchFromHome(); })
     }
     .width('100%')
-    .padding({ left: Spacing.lg, right: Spacing.lg, top: 44, bottom: 20 }) // 加大按钮与下方首张卡片的视觉空隙（v1.15.9）
+    .padding({ left: this.pageMargin, right: this.pageMargin, top: 44, bottom: 20 }) // 加大按钮与下方首张卡片的视觉空隙（v1.15.9）
     .backgroundColor(Color.Transparent)
     .zIndex(15)
     // 沉浸阅读补全（2026-09-29）：整行上移约 0.6 倍高 + 淡出 + 禁用命中（与宿主底栏同节奏）
@@ -3057,7 +3046,7 @@ export struct HomeTab {
       .onClick(() => { this.openSearchFromHome(); })
     }
     .width('100%')
-    .padding({ left: Spacing.lg, right: Spacing.lg, top: 44, bottom: 20 })
+    .padding({ left: this.pageMargin, right: this.pageMargin, top: 44, bottom: 20 })
     .backgroundColor(Color.Transparent)
     // 沉浸阅读补全（2026-09-29）：槽高固定 108 不参与内容布局（Scroll 首项自带让位），整行上移 + 淡出
     .translate({ y: this.immersiveHidden ? this.homeTopSink() : 0 })
@@ -3091,11 +3080,6 @@ export struct HomeTab {
         .transition(this.firstHomeMount ? TransitionEffect.IDENTITY : this.feedTabTransition(1))
       }
 
-      // 顶部满宽渐显带（进吧页 ForumsTab.TopFadeBand 同款照搬，2026-09-29）：
-      // 挂页面层盖列表内容；位置在悬浮 TopBar 之前，故不会盖住顶栏按钮——
-      // 官方 title 槽位路径 TopBar 在 Navigation title 层，更不受影响
-      this.TopFadeBand()
-
       // 悬浮按钮层（独立于滚动内容，帖子可穿过按钮区域）
       // 官方标题栏路径下按钮已在 Navigation title 槽位里，这里不再叠一层
       if (!HOME_OFFICIAL_TITLE_BAR) {
@@ -3105,6 +3089,11 @@ export struct HomeTab {
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Transparent)
+    // 顶部真·渐变模糊（对齐「消息/我的」范式）：挂全高根容器，渐变带从 y=0 起覆盖
+    // 状态栏+标题区；推荐/关注动态两个 feed 的滚动内容穿过顶栏下方时被渐进模糊。
+    // 此前 blur 挂在 margin 下移的 Refresh 上，渐变带从 98vp 才开始，顶栏区无模糊。
+    .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+    .overlay(() => { TopGlassVeil() })
     // 左右滑动手势：切换推荐/关注动态。
     // 用 parallelGesture 与内部 Scroll 并行识别（Scroll 会优先消费横向滑动手势导致父级 gesture 不触发）；
     // 用 PanGesture 而非 SwipeGesture：识别更宽容，onActionEnd 直接给出总位移判断方向。

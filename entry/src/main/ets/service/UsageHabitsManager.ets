@@ -20,8 +20,9 @@ import { common } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { CacheManager } from '../cache/CacheManager';
+import { TopBarFx } from '../components/TopBarFx';
 import { CACHE_KEY } from '../common/Constants';
-import { isWideBarFlatDevice } from '../common/Theme';
+import { DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE, DEFAULT_RECENT_AVATAR_SIZE, isWideBarFlatDevice } from '../common/Theme';
 
 const TAG: string = 'UsageHabitsManager';
 
@@ -33,7 +34,11 @@ const TAG: string = 'UsageHabitsManager';
  */
 export class UsageHabitsManager {
   private static instance: UsageHabitsManager | null = null;
-  private inited: boolean = false;
+  // 并发防重（2026-11-10 修复「首页隐藏时冷启动闪现首页再切走」）：缓存进行中/已完成的初始化 Promise。
+  // 旧实现 inited 布尔在恢复完成前就置位，后到的并发调用方（Index.aboutToAppear 与 EntryAbility
+  // loadContent 回调冷启动竞态）立即返回，读到尚未恢复的 AppStorage（defaultTab/dockHidden 回退
+  // 初值 → 启动落点算成首页）。改为共享同一个 Promise：所有调用方等待同一次恢复完成，与调用先后无关。
+  private initPromise: Promise<void> | null = null;
   private context: common.UIAbilityContext | null = null;
 
   static getInstance(): UsageHabitsManager {
@@ -44,14 +49,21 @@ export class UsageHabitsManager {
   }
 
   /**
-   * 初始化：从缓存恢复开关状态
+   * 初始化：从缓存恢复开关状态（并发安全：所有调用方共享同一次恢复）
    */
   async init(context: common.UIAbilityContext): Promise<void> {
-    if (this.inited) {
-      return;
+    if (this.initPromise !== null) {
+      return this.initPromise;
     }
-    this.inited = true;
     this.context = context;
+    const task: Promise<void> = this.doInit(context);
+    this.initPromise = task;
+    task.catch(() => {
+    });
+    return task;
+  }
+
+  private async doInit(context: common.UIAbilityContext): Promise<void> {
     try {
       const cache = CacheManager.getInstance();
       await cache.init(context);
@@ -66,6 +78,27 @@ export class UsageHabitsManager {
       // 「关闭自动旋转」（仅阔直屏直板显示/生效）：缺省 null → 不关（允许旋转），老用户升级零回归
       const savedAutoRotate = await cache.get(CACHE_KEY.AUTO_ROTATE);
       AppStorage.setOrCreate('autoRotateOff', savedAutoRotate === '1');
+      // 页面边距范围为 0~24 vp。
+      const savedPageMargin = await cache.get(CACHE_KEY.PAGE_MARGIN);
+      const pmRaw: number = Number.parseInt(savedPageMargin ?? '', 10);
+      const pmVal: number = Number.isNaN(pmRaw) ? DEFAULT_PAGE_MARGIN : Math.max(0, Math.min(24, pmRaw));
+      AppStorage.setOrCreate('pageMargin', pmVal);
+      const savedFloatingPageBars = await cache.get(CACHE_KEY.FLOATING_PAGE_BARS);
+      AppStorage.setOrCreate('floatingPageBars', savedFloatingPageBars !== '0');
+      AppStorage.setOrCreate('bottomBarBackdrop', await cache.get(CACHE_KEY.BOTTOM_BAR_BACKDROP) === '1');
+      // Dock 栏顺序：缺省 null → 默认 0,1,2,3,4
+      const savedDockOrder = await cache.get(CACHE_KEY.DOCK_ORDER);
+      AppStorage.setOrCreate('dockOrder', UsageHabitsManager.normalizeDockOrder(savedDockOrder));
+      // Dock 隐藏项：缺省 null → 无隐藏（全部展示）
+      const savedDockHidden = await cache.get(CACHE_KEY.DOCK_HIDDEN);
+      AppStorage.setOrCreate('dockHidden', UsageHabitsManager.normalizeDockHidden(savedDockHidden));
+      // 启动默认显示界面：缺省 null → 0（首页）；范围 0~4
+      const savedDefaultTab = await cache.get(CACHE_KEY.DEFAULT_TAB);
+      const dtRaw: number = Number.parseInt(savedDefaultTab ?? '0', 10);
+      AppStorage.setOrCreate('defaultTab', (dtRaw >= 0 && dtRaw <= 4) ? dtRaw : 0);
+      // 切页平移动画开关：缺省 null → 开（保持原有动效）
+      const savedTabAnim = await cache.get(CACHE_KEY.TAB_ANIMATION);
+      AppStorage.setOrCreate('tabAnimEnabled', savedTabAnim !== '0');
       // 「列数调整」档位：缺省 null → 0（默认自动适配），老用户升级逐像素零回归
       const savedColumnMode = await cache.get(CACHE_KEY.COLUMN_MODE);
       const cm: number = Number.parseInt(savedColumnMode ?? '0', 10);
@@ -84,7 +117,23 @@ export class UsageHabitsManager {
       AppStorage.setOrCreate('threadFastWifi', savedFastWifi !== '0');
       // 「吧主页默认进入界面」：缺省 null → 0（热门，用户拍板默认档），老用户升级零回归
       const savedForumSort = await cache.get(CACHE_KEY.FORUM_DEFAULT_SORT);
-      AppStorage.setOrCreate('forumDefaultSort', savedForumSort === '1' ? 1 : 0);
+      AppStorage.setOrCreate('forumDefaultSort', UsageHabitsManager.normalizeForumSort(savedForumSort));
+      // 「楼中楼回复字号」整体缩放：缺省 0.9（比楼层正文略小），范围 0.7~1.2
+      const savedSubReplyScale = await cache.get(CACHE_KEY.SUB_REPLY_SCALE);
+      const srRaw: number = Number.parseFloat(savedSubReplyScale ?? '0.9');
+      AppStorage.setOrCreate('subReplyScale', (isNaN(srRaw) || srRaw < 0.7 || srRaw > 1.2) ? 0.9 : srRaw);
+      const savedTopBlur = await cache.get(CACHE_KEY.TOP_BAR_BLUR);
+      const savedTopSolid = await cache.get(CACHE_KEY.TOP_BAR_SOLID);
+      const savedTopFade = await cache.get(CACHE_KEY.TOP_BAR_FADE);
+      const topFade: number = UsageHabitsManager.normalizeTopFade(savedTopFade);
+      const topSolid: number = topFade === 0 ? 0 : UsageHabitsManager.normalizeTopSolid(savedTopSolid);
+      AppStorage.setOrCreate('tbx_blur', UsageHabitsManager.normalizeTopBlur(savedTopBlur));
+      AppStorage.setOrCreate('tbx_solid', topSolid);
+      AppStorage.setOrCreate('tbx_fade', topFade > 0 && topFade <= topSolid ? topSolid + 0.02 : topFade);
+      const savedCardRadiusScale = await cache.get(CACHE_KEY.CARD_RADIUS_SCALE);
+      AppStorage.setOrCreate('cardRadiusScale', UsageHabitsManager.normalizeCardRadiusScale(savedCardRadiusScale));
+      const savedRecentAvatarSize = await cache.get(CACHE_KEY.RECENT_AVATAR_SIZE);
+      AppStorage.setOrCreate('recentAvatarSize', UsageHabitsManager.normalizeRecentAvatarSize(savedRecentAvatarSize));
       // 冷启动可能早于各列表页构造：bump 一次 tick，让已构造的页面重读档位（未构造页 aboutToAppear 自会读）
       AppStorage.setOrCreate('columnModeTick', (AppStorage.get<number>('columnModeTick') ?? 0) + 1);
     } catch (e) {
@@ -96,9 +145,22 @@ export class UsageHabitsManager {
       AppStorage.setOrCreate('columnMode', 0);
       AppStorage.setOrCreate('immersiveReading', false);
       AppStorage.setOrCreate('immersiveReadExtra', false);
+      AppStorage.setOrCreate('pageMargin', DEFAULT_PAGE_MARGIN);
+      AppStorage.setOrCreate('floatingPageBars', true);
+      AppStorage.setOrCreate('bottomBarBackdrop', false);
+      AppStorage.setOrCreate('dockOrder', '0,1,2,3,4');
+      AppStorage.setOrCreate('dockHidden', '');
+      AppStorage.setOrCreate('defaultTab', 0);
+      AppStorage.setOrCreate('tabAnimEnabled', true);
       AppStorage.setOrCreate('threadFastOpen', false);
       AppStorage.setOrCreate('threadFastWifi', true);
       AppStorage.setOrCreate('forumDefaultSort', 0);
+      AppStorage.setOrCreate('subReplyScale', 0.9);
+      AppStorage.setOrCreate('tbx_blur', TopBarFx.DEFAULT_BLUR);
+      AppStorage.setOrCreate('tbx_solid', TopBarFx.DEFAULT_SOLID);
+      AppStorage.setOrCreate('tbx_fade', TopBarFx.DEFAULT_FADE);
+      AppStorage.setOrCreate('cardRadiusScale', DEFAULT_CARD_RADIUS_SCALE);
+      AppStorage.setOrCreate('recentAvatarSize', DEFAULT_RECENT_AVATAR_SIZE);
     }
   }
 
@@ -198,6 +260,149 @@ export class UsageHabitsManager {
     }
   }
 
+  /** Dock 顺序规范化：仅接受 0~4 的五个互异 TabIndex，缺失自动补齐、非法回退默认 */
+  private static normalizeDockOrder(raw: string | null | undefined): string {
+    const parts: string[] = (raw ?? '').split(',');
+    const out: number[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const n: number = Number.parseInt(parts[i].trim(), 10);
+      if (!Number.isNaN(n) && n >= 0 && n <= 4 && out.indexOf(n) < 0) {
+        out.push(n);
+      }
+    }
+    for (let k = 0; k <= 4; k++) {
+      if (out.indexOf(k) < 0) {
+        out.push(k);
+      }
+    }
+    return out.join(',');
+  }
+
+  /** 页面左右留白（vp，0~24） */
+  getPageMargin(): number {
+    return AppStorage.get<number>('pageMargin') ?? DEFAULT_PAGE_MARGIN;
+  }
+
+  async setPageMargin(margin: number): Promise<void> {
+    const v: number = Math.max(0, Math.min(24, Math.round(margin)));
+    AppStorage.setOrCreate('pageMargin', v);
+    this.persistString(CACHE_KEY.PAGE_MARGIN, `${v}`).catch(() => {
+    });
+  }
+
+  /** Dock 栏顺序（TabIndex 逗号串） */
+  getDockOrderValue(): string {
+    return AppStorage.get<string>('dockOrder') ?? '0,1,2,3,4';
+  }
+
+  async setDockOrder(order: string): Promise<void> {
+    const normalized: string = UsageHabitsManager.normalizeDockOrder(order);
+    AppStorage.setOrCreate('dockOrder', normalized);
+    this.persistString(CACHE_KEY.DOCK_ORDER, normalized).catch(() => {
+    });
+  }
+
+  /** Dock 隐藏项规范化：仅接受 0~4 的互异 TabIndex；若全部隐藏则至少放出一个 */
+  private static normalizeDockHidden(raw: string | null | undefined): string {
+    const out: number[] = UsageHabitsManager.parseIndexList(raw ?? '');
+    if (out.length >= 5) {
+      out.length = 4;
+    }
+    return out.join(',');
+  }
+
+  /** 解析逗号分隔的 TabIndex 列表（去重、过滤非法值） */
+  private static parseIndexList(raw: string): number[] {
+    const parts: string[] = (raw ?? '').split(',');
+    const out: number[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const n: number = Number.parseInt(parts[i].trim(), 10);
+      if (!Number.isNaN(n) && n >= 0 && n <= 4 && out.indexOf(n) < 0) {
+        out.push(n);
+      }
+    }
+    return out;
+  }
+
+  /** Dock 隐藏项（TabIndex 逗号串） */
+  getDockHiddenValue(): string {
+    return AppStorage.get<string>('dockHidden') ?? '';
+  }
+
+  getDockHiddenArr(): number[] {
+    return UsageHabitsManager.parseIndexList(this.getDockHiddenValue());
+  }
+
+  isTabHidden(index: number): boolean {
+    return this.getDockHiddenArr().indexOf(index) >= 0;
+  }
+
+  /** 首个可见 Tab（启动/隐藏当前页时回退用），保证返回合法 0~4 */
+  getFirstVisibleTab(): number {
+    const order: number[] = UsageHabitsManager.parseIndexList(AppStorage.get<string>('dockOrder') ?? '0,1,2,3,4');
+    const hidden: number[] = this.getDockHiddenArr();
+    for (let i = 0; i < order.length; i++) {
+      if (hidden.indexOf(order[i]) < 0) {
+        return order[i];
+      }
+    }
+    return 0;
+  }
+
+  async setDockHidden(hidden: string): Promise<void> {
+    const normalized: string = UsageHabitsManager.normalizeDockHidden(hidden);
+    AppStorage.setOrCreate('dockHidden', normalized);
+    this.persistString(CACHE_KEY.DOCK_HIDDEN, normalized).catch(() => {
+    });
+  }
+
+  /** 启动默认显示界面（TabIndex 0~4） */
+  getDefaultTab(): number {
+    const v: number = AppStorage.get<number>('defaultTab') ?? 0;
+    return (v >= 0 && v <= 4) ? v : 0;
+  }
+
+  async setDefaultTab(tab: number): Promise<void> {
+    const v: number = (tab >= 0 && tab <= 4) ? tab : 0;
+    AppStorage.setOrCreate('defaultTab', v);
+    this.persistString(CACHE_KEY.DEFAULT_TAB, `${v}`).catch(() => {
+    });
+  }
+
+  /** 切页平移动画开关（true=播放；false=瞬时切换） */
+  isTabAnimationEnabled(): boolean {
+    return AppStorage.get<boolean>('tabAnimEnabled') ?? true;
+  }
+
+  async setTabAnimationEnabled(enabled: boolean): Promise<void> {
+    AppStorage.setOrCreate('tabAnimEnabled', enabled);
+    this.persistString(CACHE_KEY.TAB_ANIMATION, enabled ? '1' : '0').catch(() => {
+    });
+  }
+
+  private async persistString(key: string, value: string): Promise<void> {
+    if (!this.context) {
+      return;
+    }
+    try {
+      const cache = CacheManager.getInstance();
+      await cache.init(this.context);
+      await cache.put(key, value);
+    } catch (e) {
+      // 忽略持久化错误
+    }
+  }
+
+  async setFloatingPageBars(enabled: boolean): Promise<void> {
+    AppStorage.setOrCreate('floatingPageBars', enabled);
+    await this.persistString(CACHE_KEY.FLOATING_PAGE_BARS, enabled ? '1' : '0');
+  }
+
+  async setBottomBarBackdrop(enabled: boolean): Promise<void> {
+    AppStorage.setOrCreate('bottomBarBackdrop', enabled);
+    await this.persistString(CACHE_KEY.BOTTOM_BAR_BACKDROP, enabled ? '1' : '0');
+  }
+
   /**
    * 当前是否开启「帖子沉浸式阅读」（详情页向下滑动自动收起顶栏与底栏）。默认 false，保持既有行为。
    * 真源为 AppStorage（详情页 / 楼中楼页用 @StorageLink 直接同步），manager 只负责冷启动恢复与落盘。
@@ -291,12 +496,18 @@ export class UsageHabitsManager {
    * 真源为 AppStorage（吧主页 ThreadList aboutToAppear 直读），manager 只负责冷启动恢复与落盘。
    */
   getForumDefaultSort(): number {
-    return (AppStorage.get<number>('forumDefaultSort') ?? 0) === 1 ? 1 : 0;
+    return UsageHabitsManager.normalizeForumSort(AppStorage.get<number>('forumDefaultSort'));
+  }
+
+  /** 「吧主页默认进入界面」档位归一：0 = 热门 / 1 = 最新 / 2 = 精选（越界回退 0） */
+  static normalizeForumSort(raw: string | number | undefined | null): number {
+    const n: number = Number.parseInt(`${raw ?? 0}`, 10);
+    return (n >= 0 && n <= 2) ? n : 0;
   }
 
   /** 设置「吧主页默认进入界面」档位：立即更新 AppStorage 并落盘。 */
   async setForumDefaultSort(mode: number): Promise<void> {
-    const v: number = mode === 1 ? 1 : 0;
+    const v: number = UsageHabitsManager.normalizeForumSort(mode);
     AppStorage.setOrCreate('forumDefaultSort', v);
     await this.persistForumDefaultSort(v);
   }
@@ -309,6 +520,199 @@ export class UsageHabitsManager {
       const cache = CacheManager.getInstance();
       await cache.init(this.context);
       await cache.put(CACHE_KEY.FORUM_DEFAULT_SORT, `${mode}`);
+    } catch (e) {
+      // 忽略持久化错误
+    }
+  }
+
+  /** 「楼中楼回复字号」整体缩放比例（0.7~1.2，缺省 0.9），真源 AppStorage，manager 负责冷启恢复与落盘 */
+  getSubReplyScale(): number {
+    const v: number = AppStorage.get<number>('subReplyScale') ?? 0.9;
+    return (v < 0.7 || v > 1.2) ? 0.9 : v;
+  }
+
+  /** 设置「楼中楼回复字号」缩放：立即更新 AppStorage 并落盘。 */
+  async setSubReplyScale(scale: number): Promise<void> {
+    const v: number = (scale < 0.7 || scale > 1.2) ? 0.9 : scale;
+    AppStorage.setOrCreate('subReplyScale', v);
+    await this.persistSubReplyScale(v);
+  }
+
+  private async persistSubReplyScale(scale: number): Promise<void> {
+    if (!this.context) {
+      return;
+    }
+    try {
+      const cache = CacheManager.getInstance();
+      await cache.init(this.context);
+      await cache.put(CACHE_KEY.SUB_REPLY_SCALE, `${scale}`);
+    } catch (e) {
+      // 忽略持久化错误
+    }
+  }
+
+  /**
+   * 顶栏渐变模糊的半径（vp），范围 0~60。
+   * 真源为 AppStorage('tbx_blur')，TopBarFx 直读；manager 只负责冷启恢复与落盘。
+   */
+  static normalizeTopBlur(raw: string | number | undefined | null): number {
+    const n: number = Number.parseFloat(`${raw ?? ''}`);
+    if (isNaN(n)) {
+      return TopBarFx.DEFAULT_BLUR;
+    }
+    return Math.max(0, Math.min(TopBarFx.MAX_BLUR, n));
+  }
+
+  /** 实心模糊段结束位置。模糊开启时须小于渐退段。 */
+  static normalizeTopSolid(raw: string | number | undefined | null): number {
+    const n: number = Number.parseFloat(`${raw ?? ''}`);
+    if (isNaN(n)) {
+      return TopBarFx.DEFAULT_SOLID;
+    }
+    return Math.max(0, Math.min(0.9, n));
+  }
+
+  /** 渐退段结束位置，0 表示关闭渐变模糊。 */
+  static normalizeTopFade(raw: string | number | undefined | null): number {
+    const n: number = Number.parseFloat(`${raw ?? ''}`);
+    if (isNaN(n)) {
+      return TopBarFx.DEFAULT_FADE;
+    }
+    return n <= 0 ? 0 : Math.max(0.02, Math.min(1, n));
+  }
+
+  getTopBarBlur(): number {
+    return UsageHabitsManager.normalizeTopBlur(AppStorage.get<number>('tbx_blur'));
+  }
+
+  getTopBarSolid(): number {
+    return UsageHabitsManager.normalizeTopSolid(AppStorage.get<number>('tbx_solid'));
+  }
+
+  getTopBarFade(): number {
+    return UsageHabitsManager.normalizeTopFade(AppStorage.get<number>('tbx_fade'));
+  }
+
+  /**
+   * 设置顶栏模糊参数：写 AppStorage 并落盘，同时递增 topBarFxTick 广播。
+   * 因为 fuzzy 半径 / fractionStops 是 build 期读值，仅改 AppStorage 不会触发重绘；
+   * 各页以 @StorageLink('topBarFxTick') 把 tick 传进 TopBarFx.xxx(tick) 建立构建期依赖，
+   * 改任一项即全局重绘，返回其它页面立即可见。
+   * 渐退段为 0 时将实心段归零。开启时保持渐退段位于实心段之后。
+   */
+  async setTopBarFx(blur: number, solid: number, fade: number): Promise<void> {
+    const b: number = UsageHabitsManager.normalizeTopBlur(blur);
+    let f: number = UsageHabitsManager.normalizeTopFade(fade);
+    const s: number = f === 0 ? 0 : UsageHabitsManager.normalizeTopSolid(solid);
+    if (f > 0 && f <= s) {
+      f = s + 0.02;
+    }
+    AppStorage.setOrCreate('tbx_blur', b);
+    AppStorage.setOrCreate('tbx_solid', s);
+    AppStorage.setOrCreate('tbx_fade', f);
+    AppStorage.setOrCreate('topBarFxTick', (AppStorage.get<number>('topBarFxTick') ?? 0) + 1);
+    await this.persistTopBarFx(b, s, f);
+  }
+
+  /** 恢复顶栏模糊参数为默认值。 */
+  async resetTopBarFx(): Promise<void> {
+    await this.setTopBarFx(TopBarFx.DEFAULT_BLUR, TopBarFx.DEFAULT_SOLID, TopBarFx.DEFAULT_FADE);
+  }
+
+  private async persistTopBarFx(blur: number, solid: number, fade: number): Promise<void> {
+    if (!this.context) {
+      return;
+    }
+    try {
+      const cache = CacheManager.getInstance();
+      await cache.init(this.context);
+      await cache.put(CACHE_KEY.TOP_BAR_BLUR, `${blur}`);
+      await cache.put(CACHE_KEY.TOP_BAR_SOLID, `${solid}`);
+      await cache.put(CACHE_KEY.TOP_BAR_FADE, `${fade}`);
+    } catch (e) {
+      // 忽略持久化错误
+    }
+  }
+
+  /**
+   * 「卡片圆角」整体缩放比例为 0~2，0 为直角。
+   * 真源 AppStorage('cardRadiusScale')，各卡片组件以 @StorageLink 直读实现实时重绘；
+   * manager 只负责冷启恢复与落盘。
+   */
+  static normalizeCardRadiusScale(raw: string | number | undefined | null): number {
+    const n: number = Number.parseFloat(`${raw ?? ''}`);
+    if (isNaN(n)) {
+      return DEFAULT_CARD_RADIUS_SCALE;
+    }
+    return Math.max(0, Math.min(2, n));
+  }
+
+  getCardRadiusScale(): number {
+    return UsageHabitsManager.normalizeCardRadiusScale(AppStorage.get<number>('cardRadiusScale'));
+  }
+
+  /** 设置「卡片圆角」缩放：立即更新 AppStorage（全站卡片圆角实时生效）并落盘。 */
+  async setCardRadiusScale(scale: number): Promise<void> {
+    const v: number = UsageHabitsManager.normalizeCardRadiusScale(scale);
+    AppStorage.setOrCreate('cardRadiusScale', v);
+    await this.persistCardRadiusScale(v);
+  }
+
+  /** 恢复「卡片圆角」缩放为默认值。 */
+  async resetCardRadiusScale(): Promise<void> {
+    await this.setCardRadiusScale(DEFAULT_CARD_RADIUS_SCALE);
+  }
+
+  private async persistCardRadiusScale(scale: number): Promise<void> {
+    if (!this.context) {
+      return;
+    }
+    try {
+      const cache = CacheManager.getInstance();
+      await cache.init(this.context);
+      await cache.put(CACHE_KEY.CARD_RADIUS_SCALE, `${scale}`);
+    } catch (e) {
+      // 忽略持久化错误
+    }
+  }
+
+  /**
+   * 「最近进入」吧头像大小为 0~72 vp，步进 2，0 时只显示吧名。
+   * 真源 AppStorage('recentAvatarSize')，进吧页 ForumsTab 以 @StorageLink 直读实时重绘；
+   * manager 只负责冷启恢复与落盘。
+   */
+  static normalizeRecentAvatarSize(raw: string | number | undefined | null): number {
+    const n: number = Number.parseFloat(`${raw ?? ''}`);
+    if (isNaN(n)) {
+      return DEFAULT_RECENT_AVATAR_SIZE;
+    }
+    return Math.max(0, Math.min(72, Math.round(n)));
+  }
+
+  getRecentAvatarSize(): number {
+    return UsageHabitsManager.normalizeRecentAvatarSize(AppStorage.get<number>('recentAvatarSize'));
+  }
+
+  /** 设置「最近进入」吧头像大小：立即更新 AppStorage（进吧页实时生效）并落盘。 */
+  async setRecentAvatarSize(size: number): Promise<void> {
+    const v: number = UsageHabitsManager.normalizeRecentAvatarSize(size);
+    AppStorage.setOrCreate('recentAvatarSize', v);
+    await this.persistRecentAvatarSize(v);
+  }
+
+  /** 恢复「最近进入」吧头像大小为默认值。 */
+  async resetRecentAvatarSize(): Promise<void> {
+    await this.setRecentAvatarSize(DEFAULT_RECENT_AVATAR_SIZE);
+  }
+
+  private async persistRecentAvatarSize(size: number): Promise<void> {
+    if (!this.context) {
+      return;
+    }
+    try {
+      const cache = CacheManager.getInstance();
+      await cache.init(this.context);
+      await cache.put(CACHE_KEY.RECENT_AVATAR_SIZE, `${size}`);
     } catch (e) {
       // 忽略持久化错误
     }

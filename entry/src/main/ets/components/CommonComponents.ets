@@ -16,7 +16,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, fs } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, fs, DEFAULT_CARD_RADIUS_SCALE, FORUM_CARD_RADIUS_BASE
+} from '../common/Theme';
 import { PerfTrace } from '../common/PerfTrace';
 import { ImageCache } from '../cache/ImageCache';
 import {
@@ -24,7 +26,7 @@ import {
   releaseImagePreloadSlot as releaseImagePreloadSlotInner
 } from '../cache/ImageCache';
 import { TiebaService } from '../service/TiebaService';
-import { display } from '@kit.ArkUI';
+import { display, UIContext } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const LOG_DOMAIN: number = 0x0A01;
@@ -33,6 +35,15 @@ const MAX_URL_LOG: number = 120;
 
 function shortUrl(url: string): string {
   return url.length > MAX_URL_LOG ? url.substring(0, MAX_URL_LOG) + '...' : url;
+}
+
+export function openForumImagePreview(context: UIContext, urls: string[], index: number): void {
+  if (index < 0 || index >= urls.length || urls[index].length === 0) {
+    return;
+  }
+  context.getRouter().pushUrl({ url: 'pages/ImagePreview', params: { urls: urls, index: index } }).catch(() => {
+    context.getPromptAction().showToast({ message: '图片预览打开失败，请稍后重试' });
+  });
 }
 
 // 图片预下载全局并发闸门：限制同时下载的图片数，避免首屏大量卡片图片同时请求抢占带宽，
@@ -247,6 +258,8 @@ export struct PinnedThreadItem {
  */
 @Component
 export struct ThreadCard {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  forumScoped: boolean = false;
   // 2026-09-20 性能优化：@Prop 深拷贝改普通成员。卡数据只在创建时传入，后续更新全部走
   // 「key 变更 → 整卡重建」（HomeTab/ThreadList 的 key 均含 isLiked/likeCount/replyNum），
   // @Prop 的深拷贝纯属创建期浪费（多列瀑布流一次建 6+ 卡时最明显）。
@@ -657,9 +670,9 @@ export struct ThreadCard {
           // 作者头像（独立点击进用户主页；stopPropagation 避免触发整卡跳详情）
           if (this.getItem().authorAvatar && this.getItem().authorAvatar!.length > 0) {
             Image(this.getItem().authorAvatar!)
-              .width(40)
-              .height(40)
-              .borderRadius(20)
+              .width(27)
+              .height(27)
+              .borderRadius(14)
               .objectFit(ImageFit.Cover)
               .clip(true)
               .hitTestBehavior(HitTestMode.Block)
@@ -669,13 +682,13 @@ export struct ThreadCard {
           } else {
             Stack() {
               Text(this.getItem().author.charAt(0))
-                .fontSize(fs(18, this.fontScale))
+                .fontSize(fs(13, this.fontScale))
                 .fontWeight(FontWeight.Bold)
                 .fontColor(Color.White)
             }
-            .width(40)
-            .height(40)
-            .borderRadius(20)
+            .width(27)
+            .height(27)
+            .borderRadius(14)
             .backgroundColor(Theme.brand())
             .alignContent(Alignment.Center)
             .hitTestBehavior(HitTestMode.Block)
@@ -687,7 +700,7 @@ export struct ThreadCard {
           // 作者名和时间
           Column({ space: 2 }) {
             Text(this.getItem().author)
-              .fontSize(fs(15, this.fontScale))
+              .fontSize(fs(14, this.fontScale))
               .fontWeight(FontWeight.Medium)
               .fontColor(Theme.textPrimary(isDarkMode()))
               .hitTestBehavior(HitTestMode.Block)
@@ -696,24 +709,24 @@ export struct ThreadCard {
                 this.onAvatarTap(this.getItem().authorId ?? '', this.getItem().author);
               })
             Text(this.getItem().createTime)
-              .fontSize(fs(12, this.fontScale))
+              .fontSize(fs(10, this.fontScale))
               .fontColor(Theme.textTertiary(isDarkMode()))
           }
           .alignItems(HorizontalAlign.Start)
           .layoutWeight(1)
         }
         .width('100%')
-        .padding({ left: 16, right: 16, top: 16 })
+        .padding({ left: 12, right: 12, top: 14 })
 
         // 标题
         Text(this.getItem().title)
-          .fontSize(fs(17, this.fontScale))
+          .fontSize(fs(15, this.fontScale))
           .fontWeight(FontWeight.Bold)
           .fontColor(Theme.textPrimary(isDarkMode()))
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
-          .padding({ left: 16, right: 16, top: 8 })
+          .padding({ left: 12, right: 12, top: 7 })
 
         // 正文摘要：多列档降为 2 行（列窄、一屏要放下更多卡），单列逐像素维持现状 4 行
         if (this.getItem().abstract.length > 0) {
@@ -723,39 +736,36 @@ export struct ThreadCard {
             .maxLines(this.cardColumns > 1 ? 2 : 4)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .width('100%')
-            .padding({ left: 16, right: 16, top: 6 })
+            .padding({ left: 12, right: 12, top: 5 })
         }
 
         // 图片区域
-        if (this.getImageCount() > 0) {
-          Column() {
-            this.ImageGallery()
-          }
-          .width('100%')
-          .padding({ left: 16, right: 16, top: 10 })
+        if (!this.forumScoped && this.getImageCount() > 0) {
+          this.CardGallery()
         }
 
-        // 吧标签
-        Row() {
-          if (this.getItem().forumName.length > 0) {
-            Row({ space: 4 }) {
-              // 吧头像
-              if (this.getItem().forumAvatar && this.getItem().forumAvatar!.length > 0) {
-                Image(this.getItem().forumAvatar!)
-                  .width(20)
-                  .height(20)
-                  .borderRadius(10)
-                  .objectFit(ImageFit.Cover)
-                  .clip(true)
+        if (!this.forumScoped) {
+          Row() {
+            if (this.getItem().forumName.length > 0) {
+              Row({ space: 4 }) {
+                // 吧头像
+                if (this.getItem().forumAvatar && this.getItem().forumAvatar!.length > 0) {
+                  Image(this.getItem().forumAvatar!)
+                    .width(20)
+                    .height(20)
+                    .borderRadius(10)
+                    .objectFit(ImageFit.Cover)
+                    .clip(true)
+                }
+                Text(this.getItem().forumName)
+                  .fontSize(fs(13, this.fontScale))
+                  .fontColor(Theme.textSecondary(isDarkMode()))
               }
-              Text(this.getItem().forumName)
-                .fontSize(fs(13, this.fontScale))
-                .fontColor(Theme.textSecondary(isDarkMode()))
             }
           }
+          .width('100%')
+          .padding({ left: 12, right: 12, top: 8 })
         }
-        .width('100%')
-        .padding({ left: 16, right: 16, top: 10 })
       }
       .width('100%')
       .hitTestBehavior(HitTestMode.Default)
@@ -771,32 +781,27 @@ export struct ThreadCard {
         this.handlePressPrefetch(event);
       })
 
-      // ========== 操作栏（独立区域）：分享/评论/点赞三胶囊，完全不在跳转详情的点击区域内 ==========
-      // 窄卡收紧模式（actionCompact）：图标 15/文字 11/内距 4/高 30/圆角 15/外距 8——
-      // 阔直屏竖 2 列卡 ~210vp 时胶囊 ~50vp，原尺寸内容 ~50vp 必溢出（Row 不裁剪直接画出界）
-      Row({ space: this.actionCompact() ? 8 : 12 }) {
-        // 分享按钮 - 圆角胶囊（玻璃光感背景不变）+ 简约黑色分享图标（与帖子详情页右上角同款 sys.symbol.share）
-        Row({ space: this.actionCompact() ? 4 : 6 }) {
+      if (this.forumScoped && this.getImageCount() > 0) {
+        this.CardGallery()
+      }
+
+      // ========== 操作栏（独立区域）：分享/评论/点赞，完全不在跳转详情的点击区域内 ==========
+      // 官方对齐（2026-11-11 吧内卡实测）：三组 layoutWeight(1) 均布（分享靠左/评论居中/赞靠右），
+      // 无胶囊底、无玻璃、无描边——线性图标 + 灰字（官方像素 80,83,92 ≈ textSecondary）。
+      // 窄卡收紧模式（actionCompact）仅缩小图标/字号，几何口径不变。
+      Row({ space: 12 }) {
+        // 分享按钮 - 官方式朴素行：sys.symbol.share + 灰字
+        Row({ space: 4 }) {
           SymbolGlyph($r('sys.symbol.share'))
-            .fontSize(fs(this.actionCompact() ? 15 : 18, this.fontScale))
-            .fontColor([Theme.textPrimary(isDarkMode())])
+            .fontSize(fs(this.actionCompact() ? 13 : 15, this.fontScale))
+            .fontColor([Theme.textSecondary(isDarkMode())])
           Text('分享')
-            .fontSize(fs(this.actionCompact() ? 11 : 13, this.fontScale))
-            .fontColor(Theme.textPrimary(isDarkMode()))
+            .fontSize(fs(this.actionCompact() ? 10 : 12, this.fontScale))
+            .fontColor(Theme.textSecondary(isDarkMode()))
         }
         .layoutWeight(1)
-        .height(this.actionCompact() ? 30 : 36)
+        .height(this.actionCompact() ? 28 : 34)
         .justifyContent(FlexAlign.Center)
-        .borderRadius(this.actionCompact() ? 15 : 18)
-        .backgroundColor(Theme.sheetGlass(isDarkMode()))
-        .backgroundBlurStyle(BlurStyle.Regular, { scale: 0.85 })
-        .border({ width: 0.5, color: Theme.manualGlassBorder() })
-        // 2026-09-19 性能优化：删除 .shadow(Theme.glassShadowStyle()) —— 该函数恒返回全零阴影
-        // { radius: 0, color: '#00000000' }，渲染无痕迹，只是每卡白付一次阴影属性；
-        // 删除 .systemMaterial(ImmMaterial.cardAction()) —— 页面主体内材质判 out of scope 不渲染
-        // （见 docs/immersive-material-guide.md），胶囊玻璃观感由上方 backgroundColor(sheetGlass)
-        // + backgroundBlurStyle(Regular) 独立提供，故两处删除对画面零差异、每卡省 3 次材质挂载。
-        // 若后续真机实拍发现差异，把这两行原样加回即可（其余属性无需变动）。
         .onClick(() => {
           const payload: ThreadSharePayload = {
             tid: this.getItem().tid,
@@ -808,54 +813,48 @@ export struct ThreadCard {
           };
           this.onShare(payload);
         })
-        
-        // 评论按钮 - 玻璃胶囊背景不变 + 实心气泡三点图标 ellipsis_message_fill（与分享 sys.symbol.share 同为填充风格，避免描边图标过细）
-        Row({ space: this.actionCompact() ? 4 : 6 }) {
-          SymbolGlyph($r('sys.symbol.ellipsis_message_fill'))
-            .fontSize(fs(this.actionCompact() ? 15 : 18, this.fontScale))
-            .fontColor([Theme.textPrimary(isDarkMode())])
+
+        // 评论按钮 - 官方式朴素行：气泡图标 + 灰色回复数
+        Row({ space: 4 }) {
+          SymbolGlyph(this.forumScoped ? $r('sys.symbol.ellipsis_message_1') : $r('sys.symbol.ellipsis_message_fill'))
+            .fontSize(fs(this.actionCompact() ? 13 : 15, this.fontScale))
+            .fontColor([Theme.textSecondary(isDarkMode())])
           Text(`${this.getItem().replyNum}`)
-            .fontSize(fs(this.actionCompact() ? 11 : 13, this.fontScale))
-            .fontColor(Theme.textPrimary(isDarkMode()))
+            .fontSize(fs(this.actionCompact() ? 10 : 12, this.fontScale))
+            .fontColor(Theme.textSecondary(isDarkMode()))
         }
         .layoutWeight(1)
-        .height(this.actionCompact() ? 30 : 36)
+        .height(this.actionCompact() ? 28 : 34)
         .justifyContent(FlexAlign.Center)
-        .borderRadius(this.actionCompact() ? 15 : 18)
-        .backgroundColor(Theme.sheetGlass(isDarkMode()))
-        .backgroundBlurStyle(BlurStyle.Regular, { scale: 0.85 })
-        .border({ width: 0.5, color: Theme.manualGlassBorder() })
-        // 同分享钮：删除恒空阴影与页面主体内不生效的 cardAction 材质（理由见上）
         .onClick(() => {
           const tid = this.getItem().tid;
           if (tid.length > 0) {
             this.onComment(tid);
           }
         })
-        
-        // 点赞按钮 - 玻璃胶囊背景不变 + 简约心形轮廓/实心SymbolGlyph（匹配参考图一）
-        Row({ space: this.actionCompact() ? 4 : 6 }) {
-          if (this.getItem().isLiked) {
+
+        // 点赞按钮 - 官方式朴素行：心形轮廓/实心 + 灰色点赞数
+        Row({ space: 4 }) {
+          if (this.forumScoped) {
+            SymbolGlyph($r('sys.symbol.hand_thumbsup'))
+              .fontSize(fs(this.actionCompact() ? 14 : 16, this.fontScale))
+              .fontColor([this.getItem().isLiked ? Theme.brand() : Theme.textSecondary(isDarkMode())])
+          } else if (this.getItem().isLiked) {
             SymbolGlyph($r('sys.symbol.heart_fill'))
-              .fontSize(fs(this.actionCompact() ? 16 : 19, this.fontScale))
-              .fontColor([Theme.textPrimary(isDarkMode())])
+              .fontSize(fs(this.actionCompact() ? 14 : 16, this.fontScale))
+              .fontColor([Theme.textSecondary(isDarkMode())])
           } else {
             SymbolGlyph($r('sys.symbol.heart'))
-              .fontSize(fs(this.actionCompact() ? 16 : 19, this.fontScale))
-              .fontColor([Theme.textPrimary(isDarkMode())])
+              .fontSize(fs(this.actionCompact() ? 14 : 16, this.fontScale))
+              .fontColor([Theme.textSecondary(isDarkMode())])
           }
-          Text(`${this.getItem().likeCount ?? 0}`)
-            .fontSize(fs(this.actionCompact() ? 11 : 13, this.fontScale))
-            .fontColor(Theme.textPrimary(isDarkMode()))
+          Text(this.forumScoped && (this.getItem().likeCount ?? 0) === 0 ? '赞' : `${this.getItem().likeCount ?? 0}`)
+            .fontSize(fs(this.actionCompact() ? 10 : 12, this.fontScale))
+            .fontColor(Theme.textSecondary(isDarkMode()))
         }
         .layoutWeight(1)
-        .height(this.actionCompact() ? 30 : 36)
+        .height(this.actionCompact() ? 28 : 34)
         .justifyContent(FlexAlign.Center)
-        .borderRadius(this.actionCompact() ? 15 : 18)
-        .backgroundColor(Theme.sheetGlass(isDarkMode()))
-        .backgroundBlurStyle(BlurStyle.Regular, { scale: 0.85 })
-        .border({ width: 0.5, color: Theme.manualGlassBorder() })
-        // 同分享钮：删除恒空阴影与页面主体内不生效的 cardAction 材质（理由见上）
         .onClick(() => {
           const tid = this.getItem().tid;
           const postId = this.getItem().postId ?? '';
@@ -867,15 +866,11 @@ export struct ThreadCard {
         })
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: 12, bottom: 14 })
+      .padding({ left: 12, right: 12, top: 8, bottom: 12 })
     }
     .width('100%')
     .backgroundColor(Theme.bgCard(isDarkMode()))
-    // 卡片圆角 26：与帖子详情页卡片（楼主卡 / 楼层卡）统一口径，不借用全局 Radius.lg（=16）。
-    // 注：卡内「分享/评论/点赞」胶囊圆角 18、距卡片底 14，严格同心应为 18 + 14 = 32；
-    // 26 是按统一视觉口径取的值（比 32 略收敛，胶囊与外角不再严格同心，观感更克制）。
-    // 操作栏内边距与三枚胶囊尺寸一律不动。
-    .borderRadius(26)
+    .borderRadius((this.forumScoped ? FORUM_CARD_RADIUS_BASE : 10) * this.cardRadiusScale)
   }
 
   /** P2（2026-09-28）宫格解码降采样 —— 真机证伪并已撤销（2026-09-29 丢帧治理 S1）。
@@ -897,7 +892,7 @@ export struct ThreadCard {
           .constraintSize({
             maxHeight: (this.getImageCount() === 2 || this.getImageCount() === 4) ? 140 : 100
           })
-          .borderRadius(Radius.md)
+          .borderRadius(0)
           // 图位底色（2026-09-30）：图未到达、或已被判定为"确认占位"（贴吧对失效图返回长条/贴字占位图，
           // 客户端识别后拒绝上屏）时，阶梯重试窗口 [0,2s,8s,30s] 内不再是一片纯空白 ——
           // 与页面底色同源，视觉上是一个凹陷的"图位"，重试成功或整卡降级后自动被覆盖/替换。
@@ -914,7 +909,7 @@ export struct ThreadCard {
         Image(this.gridDisplayUrl(img, idx))
           .width('100%')
           .height((this.getImageCount() === 2 || this.getImageCount() === 4) ? 140 : 100)
-          .borderRadius(Radius.md)
+          .borderRadius(0)
           // 图位底色（2026-09-30）：图未到达、或已被判定为"确认占位"（贴吧对失效图返回长条/贴字占位图，
           // 客户端识别后拒绝上屏）时，阶梯重试窗口 [0,2s,8s,30s] 内不再是一片纯空白 ——
           // 与页面底色同源，视觉上是一个凹陷的"图位"，重试成功或整卡降级后自动被覆盖/替换。
@@ -937,7 +932,7 @@ export struct ThreadCard {
           .constraintSize({
             maxHeight: (this.getImageCount() === 2 || this.getImageCount() === 4) ? 140 : 100
           })
-          .borderRadius(Radius.md)
+          .borderRadius(0)
           // 图位底色（2026-09-30）：图未到达、或已被判定为"确认占位"（贴吧对失效图返回长条/贴字占位图，
           // 客户端识别后拒绝上屏）时，阶梯重试窗口 [0,2s,8s,30s] 内不再是一片纯空白 ——
           // 与页面底色同源，视觉上是一个凹陷的"图位"，重试成功或整卡降级后自动被覆盖/替换。
@@ -954,7 +949,7 @@ export struct ThreadCard {
         Image(this.gridDisplayUrl(img, idx))
           .width('100%')
           .height((this.getImageCount() === 2 || this.getImageCount() === 4) ? 140 : 100)
-          .borderRadius(Radius.md)
+          .borderRadius(0)
           // 图位底色（2026-09-30）：图未到达、或已被判定为"确认占位"（贴吧对失效图返回长条/贴字占位图，
           // 客户端识别后拒绝上屏）时，阶梯重试窗口 [0,2s,8s,30s] 内不再是一片纯空白 ——
           // 与页面底色同源，视觉上是一个凹陷的"图位"，重试成功或整卡降级后自动被覆盖/替换。
@@ -1041,6 +1036,39 @@ export struct ThreadCard {
   }
 
   @Builder
+  CardGallery() {
+    Column() {
+      this.ImageGallery()
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 10 })
+  }
+
+  @Builder
+  SingleGalleryImage() {
+    if (this.cardColumns > 1) {
+      Image(this.resolveImgUrl(this.getItem().images![0]))
+        .width('100%')
+        .aspectRatio(1.6)
+        .constraintSize({ maxHeight: 220 })
+        .objectFit(ImageFit.Cover)
+        .onError(() => { this.handleSingleImageError(); })
+        .onComplete((event) => {
+          if (event) this.handleSingleImageComplete(event.loadingStatus, event.width, event.height);
+        })
+    } else {
+      Image(this.resolveImgUrl(this.getItem().images![0]))
+        .width('100%')
+        .height(220)
+        .objectFit(ImageFit.Cover)
+        .onError(() => { this.handleSingleImageError(); })
+        .onComplete((event) => {
+          if (event) this.handleSingleImageComplete(event.loadingStatus, event.width, event.height);
+        })
+    }
+  }
+
+  @Builder
   ImageGallery() {
     if (this.imageFailed) {
       // 降级：图加载失败时不渲染大图区，避免占位看起来像"没图"；改为作者头像缩略 + 提示
@@ -1062,43 +1090,26 @@ export struct ThreadCard {
       .width('100%')
       .padding(12)
       .backgroundColor(Theme.bgCard(isDarkMode()))
-      .borderRadius(Radius.md)
+      .borderRadius(0)
       .hitTestBehavior(HitTestMode.Block)
       .onClick(() => {
-        this.onTap(this.getItem().tid);
+        if (this.forumScoped) {
+          openForumImagePreview(this.getUIContext(), this.getItem().images ?? [], 0);
+        } else {
+          this.onTap(this.getItem().tid);
+        }
       })
     } else if (this.getImageCount() === 1) {
-          // 单图：单列档逐像素保持 height(220)；多列档列宽变窄，改 16:10 比例，
-          // 避免"列宽 240 时接近方形 / 列宽 400 时明显变扁"（§4.2 决策 6）。
-          // 封顶 220：列宽变宽时 aspectRatio(1.6) 会等比放大高度，真机上出现"图比手机还大"，
-          // 锁死手机基线高度后只横向扩展、纵向不再无限放大。
-          if (this.cardColumns > 1) {
-            Image(this.resolveImgUrl(this.getItem().images![0]))
-              .width('100%')
-              .aspectRatio(1.6)
-              .constraintSize({ maxHeight: 220 })
-              .borderRadius(Radius.md)
-              .objectFit(ImageFit.Cover)
-              .onError(() => {
-                this.handleSingleImageError();
-              })
-              .onComplete((event) => {
-                if (!event) return;
-                this.handleSingleImageComplete(event.loadingStatus, event.width, event.height);
-              })
+          if (this.forumScoped) {
+            Column() {
+              this.SingleGalleryImage()
+            }
+            .width('100%')
+            .id('forum_card_image_' + this.getItem().tid + '_0')
+            .accessibilityText('查看图片')
+            .onClick(() => { openForumImagePreview(this.getUIContext(), this.getItem().images ?? [], 0); })
           } else {
-            Image(this.resolveImgUrl(this.getItem().images![0]))
-              .width('100%')
-              .height(220)
-              .borderRadius(Radius.md)
-              .objectFit(ImageFit.Cover)
-              .onError(() => {
-                this.handleSingleImageError();
-              })
-              .onComplete((event) => {
-                if (!event) return;
-                this.handleSingleImageComplete(event.loadingStatus, event.width, event.height);
-              })
+            this.SingleGalleryImage()
           }
         } else {
           // 多图网格（2-9张），使用 Grid 实现均匀间距
@@ -1108,7 +1119,17 @@ export struct ThreadCard {
                 // 多图格几何：单列档保持现状格高（2/4 张 140、其余 100）；多列档列宽随列数变，
                 // 改 1:1 比例，避免比例失真（§4.2 决策 6）。两种写法互斥（height 与 aspectRatio 同设会冲突）。
                 // 封顶同单列档：防止列宽变宽后多图格也变得比手机大。
-                this.GridCellContent(img, idx)
+                if (this.forumScoped) {
+                  Column() {
+                    this.GridCellContent(img, idx)
+                  }
+                  .width('100%')
+                  .id('forum_card_image_' + this.getItem().tid + '_' + idx)
+                  .accessibilityText('查看第' + (idx + 1) + '张图片')
+                  .onClick(() => { openForumImagePreview(this.getUIContext(), this.getItem().images ?? [], idx); })
+                } else {
+                  this.GridCellContent(img, idx)
+                }
               }
             }, (img: string, idx: number) => `${idx}`)
           }

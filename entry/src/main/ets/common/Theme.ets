@@ -953,6 +953,14 @@ export function setDarkMode(isDark: boolean): void {
   }
 }
 
+/** 界面布局偏好的默认值。 */
+export const DEFAULT_PAGE_MARGIN: number = 8;
+export const DEFAULT_CARD_RADIUS_SCALE: number = 0.5;
+export const FORUM_CARD_RADIUS_BASE: number = 10 / DEFAULT_CARD_RADIUS_SCALE;
+export const FLOATING_DOCK_PHONE_HEIGHT: number = 56;
+export const FLOATING_DOCK_PHONE_INSET: number = 22;
+export const DEFAULT_RECENT_AVATAR_SIZE: number = 40;
+
 /**
  * 间距令牌接口
  */
@@ -1361,7 +1369,7 @@ export function overrideColumns(mode: number, isLandscape: boolean): number {
 export function tabletTopFadeStop(coverVp: number): number {
   const wide: boolean = isWideFormDevice();
   if (!wide) {
-    return 0.15;
+    return 0.20;
   }
   try {
     const d: display.Display = display.getDefaultDisplaySync();
@@ -1369,7 +1377,7 @@ export function tabletTopFadeStop(coverVp: number): number {
     if (longEdge <= 0) {
       return 0.15;
     }
-    return Math.min(0.15, coverVp / longEdge);
+    return Math.min(0.15, (coverVp * 1.4) / longEdge);
   } catch (e) {
     return 0.15;
   }

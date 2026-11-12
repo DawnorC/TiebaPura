@@ -18,9 +18,14 @@
 
 import { common } from '@kit.AbilityKit';
 import { UsageHabitsManager } from '../service/UsageHabitsManager';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop,
+  DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { BRAND_BLUE } from '../common/Constants';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 /**
  * 设置 - 更多（2026-09-20 新建，此前"更多"为"即将开放"占位）：
  * 「帖子极速开启」开关——feed 首屏前 3 卡详情+图片预取，点开首屏卡即内存缓存直出真秒开。
@@ -31,6 +36,10 @@ import { BRAND_BLUE } from '../common/Constants';
 @Entry
 @Component
 struct SettingsMorePage {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  /** 页面边距（左右留白，实时同步；16=默认，0=贴边） */
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   @StorageLink('threadFastOpen') threadFastOpen: boolean = false;
   @StorageLink('threadFastWifi') threadFastWifi: boolean = true;
   @State isDark: boolean = isDarkMode();
@@ -83,7 +92,7 @@ struct SettingsMorePage {
           .width('100%')
           .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.md, bottom: Spacing.md })
           .backgroundColor(Theme.bgCard(this.isDark))
-          .borderRadius(Radius.lg)
+          .borderRadius(Radius.lg * this.cardRadiusScale)
           .margin({ top: Spacing.sm })
           .onClick(() => {
             UsageHabitsManager.getInstance().setThreadFastOpen(!this.threadFastOpen);
@@ -115,14 +124,14 @@ struct SettingsMorePage {
             .width('100%')
             .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.md, bottom: Spacing.md })
             .backgroundColor(Theme.bgCard(this.isDark))
-            .borderRadius(Radius.lg)
+            .borderRadius(Radius.lg * this.cardRadiusScale)
             .onClick(() => {
               UsageHabitsManager.getInstance().setThreadFastWifi(!this.threadFastWifi);
             })
           }
         }
         .width('100%')
-        .padding({ left: Spacing.lg, right: Spacing.lg, bottom: Spacing.xl })
+        .padding({ left: this.pageMargin, right: this.pageMargin, bottom: Spacing.xl })
       }
       .scrollBar(BarState.Off)
       .scrollable(ScrollDirection.Vertical)
@@ -132,8 +141,8 @@ struct SettingsMorePage {
       .clip(false)
       .align(Alignment.TopStart)
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .overlay(this.BottomFadeOverlay())
-      .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+      .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+      .overlay(() => { TopGlassVeil() })
 
       // 悬浮沉浸顶栏（透明底，内容可穿过；参数同 UsageHabitsPage）
       this.TopBar()
@@ -172,19 +181,5 @@ struct SettingsMorePage {
     .padding({ left: Spacing.lg, right: Spacing.lg, top: 44, bottom: 10 })
     .backgroundColor(Color.Transparent)
     .zIndex(14)
-  }
-
-  /** 渐变沉浸遮罩：顶部渐显（同 UsageHabitsPage / Settings 范式） */
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', tabletTopFadeStop(98)], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
   }
 }

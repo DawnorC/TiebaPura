@@ -18,7 +18,7 @@
 
 import { CategoryMapping, FavCategory } from '../model/DataModel';
 import { FavoriteStore, CATEGORY_DEFAULT_ID } from '../service/FavoriteStore';
-import { Theme, Spacing, Radius, ImmBlur, ImmMaterial, fs } from '../common/Theme';
+import { Theme, Spacing, Radius, ImmBlur, ImmMaterial, fs, DEFAULT_CARD_RADIUS_SCALE } from '../common/Theme';
 import { ToastUtil, ToastType } from '../common/ToastUtil';
 import { Haptic } from '../common/Haptic';
 
@@ -52,6 +52,7 @@ const PICKER_CARD_RADIUS: number = 20;
  */
 @Component
 export struct FavCategoryPicker {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
   /** 面板开合：宿主置 true 打开；下滑 / 点遮罩关闭时系统经 $$ 回写 false */
   @Link show: boolean;
   /** 分类列表（新建分类会整体回写，宿主列表随之刷新） */
@@ -360,7 +361,7 @@ export struct FavCategoryPicker {
             // §9 注：卡内条目也吃官方材质 + 半透明底（原来的不透明卡片会在玻璃面板上叠出白块，§8 坑 6）
             .systemMaterial(ImmMaterial.cardAction())
             .backgroundColor(this.isDark ? '#B31B1E24' : '#B3FFFFFF')
-            .borderRadius(PICKER_CARD_RADIUS)
+            .borderRadius(PICKER_CARD_RADIUS * this.cardRadiusScale)
             .accessibilityText(`${t.name}${t.included > 0 ? `，已含 ${t.included} 条` : ''}`)
             .onClick(() => { this.toggleTarget(t.id); })
           }
@@ -416,7 +417,7 @@ export struct FavCategoryPicker {
             // 与上方分类条目同款玻璃底（不透明底会在面板玻璃上叠出白块，§8 坑 6）
             .systemMaterial(ImmMaterial.cardAction())
             .backgroundColor(this.isDark ? '#B31B1E24' : '#B3FFFFFF')
-            .borderRadius(PICKER_CARD_RADIUS)
+            .borderRadius(PICKER_CARD_RADIUS * this.cardRadiusScale)
           } else {
             Row({ space: Spacing.md }) {
               /**
@@ -443,7 +444,7 @@ export struct FavCategoryPicker {
             .padding(Spacing.lg)
             .systemMaterial(ImmMaterial.cardAction())
             .backgroundColor(this.isDark ? '#B31B1E24' : '#B3FFFFFF')
-            .borderRadius(PICKER_CARD_RADIUS)
+            .borderRadius(PICKER_CARD_RADIUS * this.cardRadiusScale)
             .accessibilityText('新建分类')
             .onClick(() => { this.beginCreate(); })
           }

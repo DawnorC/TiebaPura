@@ -24,9 +24,15 @@ import { TiebaService } from '../service/TiebaService';
 import { AutoSignManager, AutoSignProgress, AutoSignStage, AutoSignResult } from '../service/AutoSignManager';
 import { AutoSignNotifier } from '../service/AutoSignNotifier';
 import { CacheManager } from '../cache/CacheManager';
+import { HistoryStore } from '../service/HistoryStore';
 import { CACHE_KEY, CACHE_TTL } from '../common/Constants';
 import { FollowItem, PersonalContentItem } from '../model/DataModel';
-import { Theme, Spacing, Radius, isDarkMode, setDarkMode, fs, ImmMaterial, isWideBarDevice, isLargeFoldDevice, overlayCardWidth, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns, isLargeScreenForm, isWideBarFullscreen } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, setDarkMode, fs, ImmMaterial, isWideBarDevice, isLargeFoldDevice,
+  overlayCardWidth, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns,
+  isLargeScreenForm, isWideBarFullscreen,
+  DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE, DEFAULT_RECENT_AVATAR_SIZE
+} from '../common/Theme';
 import { Haptic } from '../common/Haptic';
 import { UsageHabitsManager } from '../service/UsageHabitsManager';
 import { compareByName } from '../common/Pinyin';
@@ -36,11 +42,16 @@ import {
 } from '../common/ImmersiveReadSensor';
 import { LoadingView, EmptyView, ErrorView } from '../components/CommonComponents';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
+
 /**
  * 进吧主 Tab 页（自洽组件，仿 FavoriteTab / MessagesTab 范式，从 Index.ets 内联 Builder 抽出）：
  * - 数据自含：关注吧列表 follows / forumState / 置顶 pinnedForums / 排序 forumSortMode /
- *   足迹 recentForums / 关注吧长按菜单与排序、足迹删除弹窗 / 吧头像失败集 全部内部自管，每次挂载即拉取。
- *   足迹本地缓存直出（挂载即渲染，不等关注列表网络），并随每次挂载/从其它页面返回（forumsRefreshRequest）自动刷新。
+ *   足迹 recentForums / 关注吧长按菜单与排序、足迹删除弹窗 / 吧头像失败集 全部内部自管。
+ *   关注吧列表与足迹均本地缓存直出（挂载即渲染）：切回本 Tab 时按 FOLLOW_LIST TTL 判断——
+ *   新鲜缓存直接复用（不请求网络、不闪 Loading），过期缓存先直出再后台静默对账；
+ *   仅冷启动/无缓存才走首屏 Loading + 网络全量拉取。从其它页面返回（forumsRefreshRequest）走静默节流刷新。
  * - 与宿主（Index.ets）通信：
  *     tabLoginRefresh = 登录/登出/换号通知（宿主登录键变化时递增）→ 重同步登录态并按需重载
  *     darkTick        = 深色模式切换通知 → 重读 isDarkMode()
@@ -80,11 +91,49 @@ enum ForumSortMode {
   TimeDesc = 3,
 }
 
+enum ForumDisplayMode {
+  Standard = 0, // 标准：吧头像卡片
+  Compact = 1,  // 紧凑：仅吧名 + 等级
+}
+
 interface RecentForumItem {
   name: string;
   lastVisit: string;
   avatar?: string;
   forumId?: string;
+}
+
+/** 「我关注的吧」网格数据源：LazyForEach 虚拟化，仅构建可见单元格。
+ *  切换「紧凑/标准」/排序/置顶/列数变化时通过 onDataReloaded 只重建已实例化的可见项，
+ *  避免整块 ForEach 重建造成的切换卡顿。 */
+class FollowsDataSource implements IDataSource {
+  private listeners: DataChangeListener[] = [];
+  public data: FollowItem[] = [];
+
+  totalCount(): number {
+    return this.data.length;
+  }
+
+  getData(index: number): FollowItem {
+    return this.data[index];
+  }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    if (this.listeners.indexOf(listener) < 0) {
+      this.listeners.push(listener);
+    }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const i: number = this.listeners.indexOf(listener);
+    if (i >= 0) {
+      this.listeners.splice(i, 1);
+    }
+  }
+
+  notifyReload(): void {
+    this.listeners.forEach((l: DataChangeListener): void => l.onDataReloaded());
+  }
 }
 
 /**
@@ -294,6 +343,7 @@ struct SignAllDialog {
  */
 @CustomDialog
 struct ForumMenuDialogCard {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
   /** 系统弹窗必须声明 CustomDialogController 类型属性（ArkTS 编译期强校验） */
   controller?: CustomDialogController;
   @Link isDark: boolean;
@@ -343,7 +393,7 @@ struct ForumMenuDialogCard {
       }
       .width('100%')
       .padding({ left: Spacing.lg, right: Spacing.lg, top: 12, bottom: 12 })
-      .borderRadius(Radius.md)
+      .borderRadius(Radius.md * this.cardRadiusScale)
       .onClick(() => { this.onTogglePin(); })
 
       Column()
@@ -363,7 +413,7 @@ struct ForumMenuDialogCard {
       }
       .width('100%')
       .padding({ left: Spacing.lg, right: Spacing.lg, top: 12, bottom: 12 })
-      .borderRadius(Radius.md)
+      .borderRadius(Radius.md * this.cardRadiusScale)
       .accessibilityText('取关')
       .onClick(() => { this.onUnfollow(); })
 
@@ -390,6 +440,10 @@ struct ForumMenuDialogCard {
 
 @Component
 export struct ForumsTab {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  // 页面边距（左右留白，随设置页实时同步；16=默认，0=贴边）
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   onFollowsSync: (list: FollowItem[]) => void = (list: FollowItem[]) => {};
   /**
    * 顶部渐显带收窄（2026-09-13 用户反馈）：平板竖屏下原 15% 渐显覆盖到第一个卡片中部，
@@ -398,11 +452,16 @@ export struct ForumsTab {
   private readonly isWideFormDevice: boolean = detectWideFormDevice();
   @State loggedIn: boolean = false;
   @State forumState: LoadState = LoadState.Loading;
-  @State follows: FollowItem[] = [];
+  @State @Watch('onFollowsSourceDirty') follows: FollowItem[] = [];
+  /** 「我关注的吧」网格数据源（虚拟化，切换显示模式/排序仅重建可见项） */
+  private followsDs: FollowsDataSource = new FollowsDataSource();
   @State recentForums: RecentForumItem[] = [];
+  /** 「最近进入」吧头像大小（vp），在界面布局页调节。 */
+  @StorageLink('recentAvatarSize') recentAvatarSize: number = DEFAULT_RECENT_AVATAR_SIZE;
   @State failedAvatarNames: string[] = [];
   @State failedFollowAvatars: string[] = [];
-  @State forumSortMode: ForumSortMode = ForumSortMode.TimeDesc;
+  @State @Watch('onFollowsSourceDirty') forumSortMode: ForumSortMode = ForumSortMode.TimeDesc;
+  @State @Watch('onFollowsSourceDirty') forumDisplayMode: ForumDisplayMode = ForumDisplayMode.Standard;
   @State showForumSortDialog: boolean = false;
   /**
    * 关注吧长按菜单显隐（系统 CustomDialog + API 26 沉浸光感）。
@@ -416,7 +475,7 @@ export struct ForumsTab {
   @State forumMenuName: string = '';
   /** 弹窗展示快照：打开那一刻是否已置顶（决定菜单文案） */
   @State forumMenuPinned: boolean = false;
-  @State pinnedForums: string[] = [];
+  @State @Watch('onFollowsSourceDirty') pinnedForums: string[] = [];
   @State forumBusy: boolean = false;
   @State showRecentDelete: boolean = false;
   @State recentDeleteName: string = '';
@@ -441,6 +500,8 @@ export struct ForumsTab {
   private signAllBackground: boolean = false;
   /** 完成通知标题（正常为「一键签到完成」，整体失败为「一键签到失败」） */
   private signAllNotifyTitle: string = '一键签到完成';
+  /** AppStorage 桥接：来自「我的」页的一键签到请求（自增即触发本页既有签到流程，复用进度弹窗 / 后台签到） */
+  @StorageLink('signAllRequest') @Watch('onSignAllRequestChanged') signAllRequest: number = 0;
   @State isDark: boolean = isDarkMode();
   @State isWideScreen: boolean = false;
   // ===== 平板适配（docs/TiebaPura平板适配.md §4.1，2026-09-14 开工：竖 3 / 横 4，手机 2 列不变）=====
@@ -459,6 +520,8 @@ export struct ForumsTab {
   private pendingRemoveTs: Map<string, number> = new Map();
   // 上次关注列表静默对账时间：切 Tab 进页/返回本页的节流闸（60s 内不重复发请求）
   private lastFollowsRefreshAt: number = 0;
+  /** 最近一次 fetchAllFollowPages 是否因某页网络失败而截断（残缺列表不得覆盖更长缓存） */
+  private followFetchTruncated: boolean = false;
   // 下拉刷新进行中（2026-09-22）：Refresh 组件双向状态，落地后由 pullRefreshForums 收起
   @State forumsPullRefreshing: boolean = false;
   @StorageLink('fontScale') fontScale: number = 1.0;
@@ -467,7 +530,7 @@ export struct ForumsTab {
   // 「列数调整」档位广播（2026-09-18，个性化 → 列数调整）：@Watch 回写本地档位 → 列数函数按新档返回并强制回到列表顶部
   // （离屏期间 @StorageLink 同步不重绘，故用 tick + 本地 @State 兜底，同 fontTick 范式）
   @StorageLink('columnModeTick') @Watch('onColumnModeTick') columnModeTick: number = 0;
-  @State columnMode: number = 0;
+  @State @Watch('onFollowsSourceDirty') columnMode: number = 0;
   @StorageLink('darkTick') @Watch('onDarkTick') darkTick: number = 0;
   @StorageLink('tabLoginRefresh') @Watch('onLoginTick') tabLoginRefresh: number = 0;
   @StorageLink('forumsRefreshRequest') @Watch('onForumsRefresh') forumsRefreshRequest: number = 0;
@@ -548,6 +611,11 @@ export struct ForumsTab {
     } else {
       this.signAllDialogController.close();
     }
+  }
+
+  /** 「我的」页点「一键签到」→ 自增 signAllRequest 即触发，复用既有签到全流程（进度弹窗 / 后台签到） */
+  onSignAllRequestChanged(): void {
+    this.handleSignAll();
   }
 
   /**
@@ -716,7 +784,10 @@ export struct ForumsTab {
   onForumsRefresh(): void {
     console.info(`[FORUMS-FOLLOW] onForumsRefresh loggedIn=${this.loggedIn}`);
     if (this.loggedIn) {
-      this.loadRecentForums();
+      // 足迹重建完成后立即补齐缺失头像（关注列表兜底 + 按名网络拉取并回写足迹缓存）。
+      // 修复「刚进过的头几个吧头像空白、重启才显示」：重建只读缓存，新足迹头像为空且本路径原无补齐环节。
+      this.loadRecentForums().then((): Promise<void> => this.enrichRecentAvatars()).catch(() => {
+      });
       this.refreshFollowsSilently(false);
     }
   }
@@ -796,7 +867,18 @@ export struct ForumsTab {
     console.info(`[FORUMS-FOLLOW] refresh start force=${force}`);
     try {
       let list: FollowItem[] = await this.fetchAllFollowPages();
-      console.info(`[FORUMS-FOLLOW] refresh total=${list.length}`);
+      console.info(`[FORUMS-FOLLOW] refresh total=${list.length}${this.followFetchTruncated ? ' (truncated)' : ''}`);
+      // 网络截断（某页失败）的残缺列表：不得覆盖更长的在场列表与缓存快照，保留现状等下次刷新
+      if (this.followFetchTruncated && this.follows.length > list.length) {
+        console.info(`[FORUMS-FOLLOW] truncated ${list.length} < current ${this.follows.length}, keep current`);
+        return;
+      }
+      // 「成功但空」的响应（BDUSS 失效/风控时接口可能以空列表正常返回、不抛异常）：
+      // 本地已有在场列表时保留现状，防止瞬时态把几百条的完整列表清成 0（与截断保护同口径）
+      if (list.length === 0 && this.follows.length > 0) {
+        console.info(`[FORUMS-FOLLOW] refresh empty, keep current=${this.follows.length}`);
+        return;
+      }
       // 服务端关注列表可能滞后于关注/取关操作：对账保留未同步的乐观增量
       this.prunePendingFollows();
       if (list.length > 0) {
@@ -814,7 +896,7 @@ export struct ForumsTab {
       if (this.forumState !== LoadState.Loading) {
         this.forumState = list.length > 0 ? LoadState.Success : LoadState.Empty;
       }
-      if (list.length > 0) {
+      if (list.length > 0 && !this.followFetchTruncated) {
         await CacheManager.getInstance().putWithTtl(CACHE_KEY.FOLLOW_LIST, list, CACHE_TTL.FOLLOW_LIST);
       }
       // 新关注吧可能补齐足迹头像
@@ -866,7 +948,9 @@ export struct ForumsTab {
     }, 15000);
     try {
       if (this.loggedIn) {
-        this.loadRecentForums();
+        // 足迹重建完成后补齐缺失头像（与 onForumsRefresh 同款，见其注释）
+        this.loadRecentForums().then((): Promise<void> => this.enrichRecentAvatars()).catch(() => {
+        });
         await this.refreshFollowsSilently(true);
       }
     } finally {
@@ -906,6 +990,7 @@ export struct ForumsTab {
     const all: FollowItem[] = [];
     let page: number = 1;
     let hasMore: boolean = true;
+    this.followFetchTruncated = false;
     while (hasMore && page <= 10) {
       let batch: FollowItem[] = [];
       try {
@@ -913,7 +998,8 @@ export struct ForumsTab {
         batch = result.list;
         hasMore = result.hasMore && result.list.length > 0;
       } catch (e) {
-        // 某页失败：用已拉到的部分兜底（至少第 1 页在列）
+        // 某页失败：用已拉到的部分兜底（至少第 1 页在列），并标记截断
+        this.followFetchTruncated = true;
         hasMore = false;
       }
       for (const f of batch) {
@@ -932,21 +1018,46 @@ export struct ForumsTab {
       this.forumState = LoadState.Empty;
       return;
     }
-    this.forumState = LoadState.Loading;
     this.loadForumPrefs();
+    // stale-while-revalidate：本页为条件挂载 Tab，切回即重建，有缓存必须秒开——
+    // 先读缓存（含过期数据）直出，新鲜则跳过网络、过期则后台静默刷新，均不闪 Loading。
     try {
-      const cached = await CacheManager.getInstance().getWithTtl<FollowItem[]>(CACHE_KEY.FOLLOW_LIST);
-      if (cached && cached.length > 0) {
-        this.follows = cached;
+      const entry = await CacheManager.getInstance().getWithTtlAllowStale<FollowItem[]>(CACHE_KEY.FOLLOW_LIST);
+      if (entry && entry.data.length > 0) {
+        this.follows = entry.data;
         this.syncFollows();
         this.forumState = LoadState.Success;
+        this.enrichRecentAvatars();
+        if (!entry.expired) {
+          // 缓存仍新鲜（<FOLLOW_LIST TTL）：直接复用，跳过网络请求，切 Tab 零延迟
+          console.info(`[FORUMS-FOLLOW] loadForums cache-hit total=${entry.data.length}`);
+          return;
+        }
+        // 缓存已过期：后台静默对账刷新，界面保持 stale 数据，不闪屏
+        console.info(`[FORUMS-FOLLOW] loadForums cache-stale total=${entry.data.length}`);
+        await this.refreshFollowsSilently(false);
+        return;
       }
+    } catch (e) {
+      // 读缓存异常不阻断下方首屏网络拉取
+    }
+    // 无任何缓存（首次登录 / 冷启动）：首屏 Loading + 网络全量拉取
+    this.forumState = LoadState.Loading;
+    try {
       const list = await this.fetchAllFollowPages();
-      console.info(`[FORUMS-FOLLOW] loadForums network total=${list.length}`);
+      console.info(`[FORUMS-FOLLOW] loadForums network total=${list.length}${this.followFetchTruncated ? ' (truncated)' : ''}`);
+      // 「成功但空」的响应：本地已有在场列表时保留，不清零覆盖（BDUSS 失效时接口可能空列表正常返回）
+      if (list.length === 0 && this.follows.length > 0) {
+        console.info(`[FORUMS-FOLLOW] loadForums network empty, keep local=${this.follows.length}`);
+        this.forumState = LoadState.Success;
+        this.enrichRecentAvatars();
+        return;
+      }
       this.follows = list;
       this.syncFollows();
       this.forumState = list.length > 0 ? LoadState.Success : LoadState.Empty;
-      if (list.length > 0) {
+      // 截断的残缺列表只做在场显示，不写缓存（避免残缺快照被后续读者当完整列表新鲜直出）
+      if (list.length > 0 && !this.followFetchTruncated) {
         await CacheManager.getInstance().putWithTtl(CACHE_KEY.FOLLOW_LIST, list, CACHE_TTL.FOLLOW_LIST);
       }
       // 关注列表已就绪：补齐足迹头像（先查关注吧，仍缺的再按吧名拉取并回写历史缓存）
@@ -994,6 +1105,14 @@ export struct ForumsTab {
       }
     } catch (e) {
     }
+    try {
+      const rawDisplay = await CacheManager.getInstance().get(`${CACHE_KEY.FOLLOW_FORUM_DISPLAY}_${accountId}`);
+      if (rawDisplay) {
+        const dm: number = parseInt(rawDisplay, 10);
+        this.forumDisplayMode = dm === ForumDisplayMode.Compact ? ForumDisplayMode.Compact : ForumDisplayMode.Standard;
+      }
+    } catch (e) {
+    }
   }
 
   private saveForumSort(): void {
@@ -1003,6 +1122,58 @@ export struct ForumsTab {
     }
     CacheManager.getInstance().put(`${CACHE_KEY.FOLLOW_FORUM_SORT}_${accountId}`, String(this.forumSortMode)).catch(() => {
     });
+  }
+
+  private saveForumDisplay(): void {
+    const accountId: string = this.accountId();
+    if (accountId.length === 0) {
+      return;
+    }
+    CacheManager.getInstance().put(`${CACHE_KEY.FOLLOW_FORUM_DISPLAY}_${accountId}`, String(this.forumDisplayMode)).catch(() => {
+    });
+  }
+
+  /** 数据源同步：影响「我关注的吧」列表的数据/排序/置顶/显示模式/列数变化都由 @Watch 汇聚到这里。
+   *  LazyForEach 只重建已实例化的可见单元格 → 切换紧凑/标准不再整块重建，消除卡顿。 */
+  private onFollowsSourceDirty(): void {
+    this.syncFollowsDs();
+  }
+
+  private syncFollowsDs(): void {
+    this.followsDs.data = this.sortedFollows();
+    this.followsDs.notifyReload();
+  }
+
+  /** 切换「我关注的吧」显示模式：标准（吧头像卡片）/ 紧凑（仅吧名 + 等级，无头像 / 热度） */
+  private toggleForumDisplayMode(): void {
+    this.forumDisplayMode = this.forumDisplayMode === ForumDisplayMode.Compact
+      ? ForumDisplayMode.Standard
+      : ForumDisplayMode.Compact;
+    this.saveForumDisplay();
+    Haptic.light();
+    this.toast(this.forumDisplayMode === ForumDisplayMode.Compact ? '已切换为紧凑模式' : '已切换为标准模式');
+  }
+
+  /** 「我关注的吧」网格列数：紧凑模式单元格更小，适当增加列数 */
+  private forumCellColumns(): number {
+    if (this.forumDisplayMode === ForumDisplayMode.Compact) {
+      return Math.min(this.forumColumns() + 1, 4);
+    }
+    return this.forumColumns();
+  }
+
+  /** 打开全吧搜索（搜吧 / 搜贴 / 搜人），与首页搜索入口一致 */
+  private openGlobalSearch(): void {
+    try {
+      this.getUIContext().getRouter().pushUrl({ url: 'pages/Search' })
+        .catch((err: Error) => {
+          this.getUIContext().getPromptAction().showToast({
+            message: `打开搜索失败：${err instanceof Error ? err.message : String(err)}`
+          });
+        });
+    } catch (e) {
+      this.getUIContext().getPromptAction().showToast({ message: '打开搜索失败' });
+    }
   }
 
   private savePinnedForums(): void {
@@ -1150,6 +1321,9 @@ export struct ForumsTab {
       }
     }
     this.recentForums = this.recentForums.filter((r: RecentForumItem) => r.name !== name);
+    // 同步清理「最近进入」独立足迹存储
+    HistoryStore.getInstance().removeForumVisit(name).catch(() => {
+    });
     this.recentDeleteName = '';
     this.showRecentDelete = false;
     Haptic.light();
@@ -1166,15 +1340,37 @@ export struct ForumsTab {
         return;
       }
       const raw = await CacheManager.getInstance().get(`${CACHE_KEY.PERSONAL_HISTORY}_${accountId}`);
-      if (!raw) {
-        return;
-      }
-      const items: PersonalContentItem[] = JSON.parse(raw) as PersonalContentItem[];
-      if (!items || items.length === 0) {
-        return;
+      let items: PersonalContentItem[] = [];
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as PersonalContentItem[];
+          items = Array.isArray(parsed) ? parsed : [];
+        } catch (e) {
+          items = [];
+        }
       }
       const seen = new Set<string>();
       const recents: RecentForumItem[] = [];
+      // ① 「最近进入」足迹优先：进吧即记录（独立于帖子浏览历史），最新进入排最前（显示在“最近进入”最左侧）
+      try {
+        const visits = await HistoryStore.getInstance().loadForumVisits();
+        for (const v of visits) {
+          if (v.name.length === 0 || seen.has(v.name)) {
+            continue;
+          }
+          seen.add(v.name);
+          let va: string = v.avatar ?? '';
+          if (va.length === 0 || !this.isValidAvatarUrl(va)) {
+            va = this.findFollowAvatar(v.name);
+          }
+          recents.push({ name: v.name, lastVisit: `${v.lastVisit}`, forumId: v.forumId ?? '', avatar: va });
+          if (recents.length >= 12) {
+            break;
+          }
+        }
+      } catch (e) {
+      }
+      // ② 帖子浏览历史（同吧去重，作为足迹的补充）
       for (const item of items) {
         const fname = item.forumName ?? '';
         if (fname.length === 0 || seen.has(fname)) {
@@ -1211,7 +1407,8 @@ export struct ForumsTab {
   }
 
   /** 关注列表就绪后的足迹头像补全：先用关注吧头像补齐仍缺头像的项，
-   *  其余再走按吧名网络拉取并回写历史缓存（由 loadForums 收尾调用，避免挂载期重复发头像请求） */
+   *  其余再走按吧名网络拉取并回写历史缓存（由 loadForums / onForumsRefresh / 下拉刷新在足迹重建后调用，
+ *  只对真正缺头像的项发请求，非每次全量拉取） */
   private async enrichRecentAvatars(): Promise<void> {
     let changed: boolean = false;
     const base: RecentForumItem[] = this.recentForums.map((r: RecentForumItem): RecentForumItem => {
@@ -1247,6 +1444,9 @@ export struct ForumsTab {
           if (idx >= 0) {
             updated[idx] = { name: updated[idx].name, lastVisit: updated[idx].lastVisit, forumId: updated[idx].forumId, avatar: avatar };
           }
+          // 回写「最近进入」足迹缓存：防下次 loadRecentForums 重建时又被空头像覆盖（重启前补齐、重启后丢失的根源）
+          HistoryStore.getInstance().updateForumVisitAvatar(item.name, avatar).catch(() => {
+          });
           // Also update the history cache so the avatar persists
           if (accountId.length > 0) {
             try {
@@ -1524,18 +1724,11 @@ export struct ForumsTab {
 
       Blank()
 
-      // 一键签到：一次给全部关注的吧签到（进度浮层见 SignAllDialog；开关见「软件设置 → 一键签到」）
+      // 搜索：打开全吧搜索（搜吧 / 搜贴 / 搜人）
       Button() {
-        if (this.signAllRunning) {
-          LoadingProgress()
-            .width(22)
-            .height(22)
-            .color(Theme.brand())
-        } else {
-          SymbolGlyph($r('sys.symbol.checkmark_circle'))
-            .fontColor([$r('sys.color.icon_primary')])
-            .fontSize(fs(22, this.fontScale))
-        }
+        SymbolGlyph($r('sys.symbol.magnifyingglass'))
+          .fontColor([$r('sys.color.icon_primary')])
+          .fontSize(fs(20, this.fontScale))
       }
       .width(44)
       .height(44)
@@ -1545,8 +1738,8 @@ export struct ForumsTab {
       .shadow(Theme.segGlassShadow(this.isDark, false))
       .borderRadius(Radius.full)
       .margin({ left: 12 })
-      .accessibilityText('一键签到')
-      .onClick(() => { this.handleSignAll(); })
+      .accessibilityText('搜索吧或帖子')
+      .onClick(() => { this.openGlobalSearch(); })
 
       Button() {
         Text('⇅')
@@ -1569,9 +1762,9 @@ export struct ForumsTab {
       })
 
       Button() {
-        SymbolGlyph(this.isDark
-          ? $r('sys.symbol.sun_max_fill')
-          : $r('sys.symbol.moon_fill'))
+        SymbolGlyph(this.forumDisplayMode === ForumDisplayMode.Compact
+          ? $r('sys.symbol.grid')
+          : $r('sys.symbol.line_3_horizontal'))
           .fontColor([$r('sys.color.icon_primary')])
           .fontSize(fs(20, this.fontScale))
       }
@@ -1583,15 +1776,9 @@ export struct ForumsTab {
       .shadow(Theme.segGlassShadow(this.isDark, false))
       .borderRadius(Radius.full)
       .margin({ left: 12 })
-      .accessibilityText('切换深色模式')
+      .accessibilityText(this.forumDisplayMode === ForumDisplayMode.Compact ? '切换为标准显示' : '切换为紧凑显示')
       .onClick(() => {
-        this.isDark = !this.isDark;
-        // 用户主动切换：写 manual + 关跟随系统（避免 onConfigurationUpdate 在 setColorMode 异步窗口内
-        // 拿到旧 Configuration 反向拉回档位）。与 PersonalizedPage 「深色模式」开关完全等价。
-        UsageHabitsManager.getInstance().setFollowSystemDark(false);
-        UsageHabitsManager.getInstance().setDarkModeManual(this.isDark);
-        setDarkMode(this.isDark);
-        AppStorage.setOrCreate<number>('darkTick', (AppStorage.get<number>('darkTick') ?? 0) + 1);
+        this.toggleForumDisplayMode();
       })
     }
     .width('100%')
@@ -1627,18 +1814,11 @@ export struct ForumsTab {
 
       Blank()
 
-      // 一键签到：一次给全部关注的吧签到（进度浮层见 SignAllDialog；开关见「软件设置 → 一键签到」）
+      // 搜索：打开全吧搜索（搜吧 / 搜贴 / 搜人）
       Button() {
-        if (this.signAllRunning) {
-          LoadingProgress()
-            .width(22)
-            .height(22)
-            .color(Theme.brand())
-        } else {
-          SymbolGlyph($r('sys.symbol.checkmark_circle'))
-            .fontColor([$r('sys.color.icon_primary')])
-            .fontSize(fs(22, this.fontScale))
-        }
+        SymbolGlyph($r('sys.symbol.magnifyingglass'))
+          .fontColor([$r('sys.color.icon_primary')])
+          .fontSize(fs(20, this.fontScale))
       }
       .width(44)
       .height(44)
@@ -1646,8 +1826,8 @@ export struct ForumsTab {
       .systemMaterial(ImmMaterial.seg(false))
       .borderRadius(Radius.full)
       .margin({ left: 12 })
-      .accessibilityText('一键签到')
-      .onClick(() => { this.handleSignAll(); })
+      .accessibilityText('搜索吧或帖子')
+      .onClick(() => { this.openGlobalSearch(); })
 
       Button() {
         Text('⇅')
@@ -1668,9 +1848,9 @@ export struct ForumsTab {
       })
 
       Button() {
-        SymbolGlyph(this.isDark
-          ? $r('sys.symbol.sun_max_fill')
-          : $r('sys.symbol.moon_fill'))
+        SymbolGlyph(this.forumDisplayMode === ForumDisplayMode.Compact
+          ? $r('sys.symbol.grid')
+          : $r('sys.symbol.line_3_horizontal'))
           .fontColor([$r('sys.color.icon_primary')])
           .fontSize(fs(20, this.fontScale))
       }
@@ -1680,15 +1860,9 @@ export struct ForumsTab {
       .systemMaterial(ImmMaterial.seg(false))
       .borderRadius(Radius.full)
       .margin({ left: 12 })
-      .accessibilityText('切换深色模式')
+      .accessibilityText(this.forumDisplayMode === ForumDisplayMode.Compact ? '切换为标准显示' : '切换为紧凑显示')
       .onClick(() => {
-        this.isDark = !this.isDark;
-        // 用户主动切换：写 manual + 关跟随系统（避免 onConfigurationUpdate 在 setColorMode 异步窗口内
-        // 拿到旧 Configuration 反向拉回档位）。与 PersonalizedPage 「深色模式」开关完全等价。
-        UsageHabitsManager.getInstance().setFollowSystemDark(false);
-        UsageHabitsManager.getInstance().setDarkModeManual(this.isDark);
-        setDarkMode(this.isDark);
-        AppStorage.setOrCreate<number>('darkTick', (AppStorage.get<number>('darkTick') ?? 0) + 1);
+        this.toggleForumDisplayMode();
       })
     }
     .width('100%')
@@ -1754,27 +1928,6 @@ export struct ForumsTab {
   }
 
   /**
-   * 顶部满宽渐显带（2026-09-14 顺带修复，同 `docs/fade-band-fullwidth-fix.md`）：原整页 DST_IN
-   * 遮罩（挂滚动层）离屏层宽度解析异常 → 渐显带右缘缺一条竖带。改 **背景色渐变条** 挂在页面顶层：
-   * 下层是纯背景色，背景色渐变条叠加 = 视觉等价渐隐，宽度不依赖滚动容器 / 离屏层解析。
-   * 高 98 = 顶栏（按钮 + 标题）；渐变自顶部线性、无全实段（否则内容到顶栏会被"硬切"）。
-   */
-  @Builder
-  TopFadeBand() {
-    Column()
-      .width('100%')
-      .height(98)
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [
-          [Theme.bg(this.isDark), 0.0],
-          [this.isDark ? '#00101114' : '#00F2F4F7', 1.0]
-        ]
-      })
-      .hitTestBehavior(HitTestMode.None)
-  }
-
-  /**
    * 关注吧排序菜单内容（系统 `bindMenu` 的 CustomBuilder）。
    * 原自绘浮层的外壳（全屏遮罩 / `position` / 玻璃自绘 / 弹出动画）已全部交给 `bindMenu`：
    * 定位 → 隐形锚点 + `Placement.BottomRight`；背景 / 圆角 / 描边 / 阴影 → `options.systemMaterial`。
@@ -1808,7 +1961,7 @@ export struct ForumsTab {
     }
     .width(210)
     .padding({ left: 16, right: 16, top: 13, bottom: 13 })
-    .borderRadius(Radius.md)
+    .borderRadius(Radius.md * this.cardRadiusScale)
     .onClick(() => { this.applyForumSort(mode); })
   }
 
@@ -1874,7 +2027,7 @@ export struct ForumsTab {
       .padding({ top: Spacing.md })
       // 真模糊磨砂：低不透明发透底 + 0.5 白描边 + backgroundBlurStyle（页面主体 systemMaterial 不在槽位，渲染无效；2026-09-07 probe 实证 API26 自绘弹窗浮层挂材质亦 out of scope，见指南 §10.3）
       .backgroundColor(Theme.sheetGlass(this.isDark))
-      .borderRadius(32)
+      .borderRadius(32 * this.cardRadiusScale)
       .border({ width: 0.5, color: Theme.manualGlassBorder() })
       .backgroundBlurStyle(BlurStyle.Regular, { scale: 0.85 })
       .shadow({ radius: 48, color: '#3D000000', offsetY: 18 })
@@ -1891,7 +2044,47 @@ export struct ForumsTab {
   }
 
   /**
-   * 内容层：我的足迹 + 关注吧网格 + 底部渐隐（官方标题栏路径与兜底路径共用同一份内容）。
+   * 「我关注的吧」紧凑模式单元：仅显示吧名 + 等级，不含头像 / 热度 / 签到标，
+   * 点击进吧、长按呼出同款关注吧菜单，与标准卡片交互一致。
+   */
+  @Builder
+  CompactFollowCell(forum: FollowItem) {
+    Row({ space: 6 }) {
+      if (forum.level > 0) {
+        Text(`${forum.level}`)
+          .fontSize(fs(10, this.fontScale))
+          .fontColor(Color.White)
+          .backgroundColor(Theme.levelColor(forum.level ?? 0))
+          .borderRadius(8)
+          .minFontScale(1)
+          .maxFontScale(1)
+          .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+      }
+      Text(forum.forumName)
+        .fontSize(fs(13, this.fontScale))
+        .fontWeight(FontWeight.Medium)
+        .fontColor(Theme.textPrimary(this.isDark))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .padding({ left: 10, right: 10, top: 10, bottom: 10 })
+    .backgroundColor(Theme.bgCard(this.isDark))
+    .borderRadius(Radius.lg * this.cardRadiusScale)
+    .onClick(() => this.openForum(forum.forumName, forum.forumId ?? ''))
+    .gesture(LongPressGesture({ fingers: 1, repeat: false, duration: 350 })
+      .onAction(() => {
+        this.forumMenuTarget = forum;
+        this.forumMenuName = forum.forumName;
+        this.forumMenuPinned = this.isForumPinned(forum.forumName);
+        this.showForumMenu = true;
+        Haptic.light();
+      }))
+  }
+
+  /**
+   * 内容层：最近进入 + 关注吧网格 + 底部渐隐（官方标题栏路径与兜底路径共用同一份内容）。
    */
   @Builder
   ForumsContent() {
@@ -1933,7 +2126,7 @@ export struct ForumsTab {
                     SymbolGlyph($r('sys.symbol.clock'))
                       .fontSize(fs(18, this.fontScale))
                       .fontColor([$r('sys.color.icon_primary')])
-                    Text('我的足迹')
+                    Text('最近进入')
                       .fontSize(fs(18, this.fontScale))
                       .fontWeight(FontWeight.Bold)
                       .fontColor(Theme.textPrimary(this.isDark))
@@ -1943,35 +2136,36 @@ export struct ForumsTab {
                 }
                 .width('100%')
                 .alignItems(VerticalAlign.Center)
-                .padding({ left: Spacing.lg, right: Spacing.lg })
+                .padding({ left: this.pageMargin, right: this.pageMargin })
 
                 Scroll() {
                   Row({ space: 14 }) {
                     ForEach(this.recentForums, (recent: RecentForumItem) => {
                       Column({ space: 8 }) {
-                        if (recent.avatar && this.isValidAvatarUrl(recent.avatar!) && !this.isAvatarFailed(recent.name)) {
+                        if (this.recentAvatarSize > 0 && recent.avatar &&
+                          this.isValidAvatarUrl(recent.avatar!) && !this.isAvatarFailed(recent.name)) {
                           Image(this.normalizeAvatarForDisplay(recent.avatar!))
-                            .width(54)
-                            .height(54)
-                            .borderRadius(27)
+                            .width(this.recentAvatarSize)
+                            .height(this.recentAvatarSize)
+                            .borderRadius(this.recentAvatarSize / 2)
                             .objectFit(ImageFit.Cover)
                             .clip(true)
                             .onError(() => {
                               this.markAvatarFailed(recent.name);
                             })
-                        } else {
+                        } else if (this.recentAvatarSize > 0) {
                           Stack() {
                             Text(recent.name.charAt(0))
-                              .fontSize(fs(22, this.fontScale))
+                              .fontSize(fs(Math.round(this.recentAvatarSize * 0.4), this.fontScale))
                               .fontWeight(FontWeight.Bold)
                               .fontColor(Theme.brand())
                               .width('100%')
                               .height('100%')
                               .textAlign(TextAlign.Center)
                           }
-                          .width(54)
-                          .height(54)
-                          .borderRadius(27)
+                          .width(this.recentAvatarSize)
+                          .height(this.recentAvatarSize)
+                          .borderRadius(this.recentAvatarSize / 2)
                           .backgroundColor(Theme.brandBg(this.isDark))
                           .alignContent(Alignment.Center)
                           .clip(true)
@@ -1981,7 +2175,7 @@ export struct ForumsTab {
                           .fontColor(Theme.textPrimary(this.isDark))
                           .maxLines(1)
                           .textOverflow({ overflow: TextOverflow.Ellipsis })
-                          .width(72)
+                          .width(Math.max(58, this.recentAvatarSize + 18))
                           .textAlign(TextAlign.Center)
                       }
                       .onClick(() => {
@@ -1993,11 +2187,11 @@ export struct ForumsTab {
                           this.showRecentDelete = true;
                           Haptic.light();
                         }))
-                    }, (recent: RecentForumItem) => recent.name)
+                    }, (recent: RecentForumItem) => `${recent.name}_${recent.avatar ?? ''}`)
                   }
                   .constraintSize({ minWidth: '100%' })
                   .justifyContent(FlexAlign.Start)
-                  .padding({ left: Spacing.lg, right: Spacing.lg })
+                  .padding({ left: this.pageMargin, right: this.pageMargin })
                 }
                 .scrollable(ScrollDirection.Horizontal)
                 .scrollBar(BarState.Off)
@@ -2037,50 +2231,14 @@ export struct ForumsTab {
               }
               .width('100%')
               .alignItems(VerticalAlign.Center)
-              .padding({ left: Spacing.lg, right: Spacing.lg })
+              .padding({ left: this.pageMargin, right: this.pageMargin })
 
               Grid() {
-                // 创建吧 入口
-                GridItem() {
-                  Column({ space: 8 }) {
-                    Row({ space: 10 }) {
-                      Stack() {
-                        Text('＋')
-                          .fontSize(fs(22, this.fontScale))
-                          .fontColor(Color.White)
-                      }
-                      .width(44)
-                      .height(44)
-                      .borderRadius(22)
-                      .backgroundColor(Theme.brand())
-
-                      Column({ space: 3 }) {
-                        Text('创建吧')
-                          .fontSize(fs(14, this.fontScale))
-                          .fontWeight(FontWeight.Medium)
-                          .fontColor(Theme.textPrimary(this.isDark))
-                          .maxLines(1)
-                          .textOverflow({ overflow: TextOverflow.Ellipsis })
-                        Text('新建吧，做吧主')
-                          .fontSize(fs(11, this.fontScale))
-                          .fontColor(Theme.textSecondary(this.isDark))
-                      }
-                      .layoutWeight(1)
-                      .alignItems(HorizontalAlign.Start)
-                    }
-                    .width('100%')
-                    .padding(Spacing.md)
-                    .backgroundColor(Theme.bgCard(this.isDark))
-                    .borderRadius(Radius.lg)
-                    .onClick(() => {
-                      this.getUIContext().getPromptAction().showToast({ message: '创建吧需要贴吧官方接口支持' });
-                    })
-                  }
-                  .width('100%')
-                }
-
-                ForEach(this.sortedFollows(), (forum: FollowItem) => {
+                LazyForEach(this.followsDs, (forum: FollowItem) => {
                   GridItem() {
+                    if (this.forumDisplayMode === ForumDisplayMode.Compact) {
+                      this.CompactFollowCell(forum)
+                    } else {
                     Stack({ alignContent: Alignment.TopEnd }) {
                     Column({ space: 8 }) {
                       Row({ space: 10 }) {
@@ -2155,7 +2313,7 @@ export struct ForumsTab {
                       .width('100%')
                       .padding(Spacing.md)
                       .backgroundColor(Theme.bgCard(this.isDark))
-                      .borderRadius(Radius.lg)
+                      .borderRadius(Radius.lg * this.cardRadiusScale)
                       .onClick(() => this.openForum(forum.forumName, forum.forumId ?? ''))
                       .gesture(LongPressGesture({ fingers: 1, repeat: false, duration: 350 })
                         .onAction(() => {
@@ -2177,14 +2335,15 @@ export struct ForumsTab {
                         .accessibilityText('已置顶')
                     }
                     }
+                    }
                   }
                 }, (forum: FollowItem) => forum.forumName)
               }
-              .columnsTemplate(this.columnsTemplateOf(this.forumColumns()))
+              .columnsTemplate(this.columnsTemplateOf(this.forumCellColumns()))
               .columnsGap(Spacing.md)
               .rowsGap(Spacing.md)
               .width('100%')
-              .padding({ left: Spacing.lg, right: Spacing.lg })
+              .padding({ left: this.pageMargin, right: this.pageMargin })
             }
             .width('100%')
           }
@@ -2209,10 +2368,6 @@ export struct ForumsTab {
       .clip(false)
       .onRefreshing(() => { this.pullRefreshForums(); })
 
-    // §4.1 顺带（2026-09-14）：顶部渐显带改挂页面层（盖列表内容）；位置在悬浮 TopBar **之前**，
-    // 故不会盖住顶栏按钮——官方 title 槽位路径 TopBar 在 Navigation title 层，更不受影响
-    this.TopFadeBand()
-
     // 悬浮TopBar层（内容可穿过TopBar区域）；官方 title 槽位路径下三钮已在槽位里，这里不再叠一层
     if (!FORUMS_OFFICIAL_TITLE_BAR) {
       this.TopBar()
@@ -2231,7 +2386,6 @@ export struct ForumsTab {
       .hitTestBehavior(HitTestMode.None)
       .bindMenu(this.showForumSortDialog, this.ForumSortMenuContent(), {
         placement: Placement.BottomRight,
-        targetSpace: LengthMetrics.vp(0),
         systemMaterial: ImmMaterial.menu(),
         onDisappear: () => { this.showForumSortDialog = false; }
       })
@@ -2242,6 +2396,11 @@ export struct ForumsTab {
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Transparent)
+    // 顶部真·渐变模糊（对齐「消息/我的」范式）：挂全高根 Stack，渐变带从 y=0 起覆盖
+    // 状态栏+标题区；列表内容经 Refresh clip(false) 上溢穿过顶栏下方时被渐进模糊
+    // （替代已删除的 GradientBlurBar 纯色渐变条假遮罩）。
+    .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+    .overlay(() => { TopGlassVeil() })
     .onAreaChange((oldValue: Area, newValue: Area) => {
       const width = newValue.width as number;
       const height = newValue.height as number;

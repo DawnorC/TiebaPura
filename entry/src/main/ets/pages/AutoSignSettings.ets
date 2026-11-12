@@ -18,10 +18,15 @@
 
 import { common } from '@kit.AbilityKit';
 import { AutoSignManager } from '../service/AutoSignManager';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop,
+  DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { BRAND_BLUE } from '../common/Constants';
 import { Haptic } from '../common/Haptic';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 /**
  * 一键签到设置页（软件设置 → 一键签到）。
  * 一级界面，仅提供一键签到相关的功能开关，视觉/间距/交互与其它设置页（Settings / UsageHabitsPage）完全一致：
@@ -31,6 +36,10 @@ import { Haptic } from '../common/Haptic';
 @Entry
 @Component
 struct AutoSignSettings {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  /** 页面边距（左右留白，实时同步；16=默认，0=贴边） */
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   /** 慢速模式：签到每个吧的时间间隔更长 */
   @StorageLink('autoSignSlowMode') slowMode: boolean = true;
   /** 使用官方一键签到：先批量签一批，减少逐吧签到数量 */
@@ -87,7 +96,7 @@ struct AutoSignSettings {
           )
         }
         .width('100%')
-        .padding({ left: Spacing.lg, right: Spacing.lg, bottom: Spacing.xl })
+        .padding({ left: this.pageMargin, right: this.pageMargin, bottom: Spacing.xl })
       }
       .scrollBar(BarState.Off)
       .scrollable(ScrollDirection.Vertical)
@@ -97,8 +106,8 @@ struct AutoSignSettings {
       .clip(false)
       .align(Alignment.TopStart)
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .overlay(this.BottomFadeOverlay())
-      .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+      .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+      .overlay(() => { TopGlassVeil() })
 
       // 悬浮沉浸顶栏（透明底，内容可穿过；参数同 Settings.ets）
       this.TopBar()
@@ -139,20 +148,6 @@ struct AutoSignSettings {
     .zIndex(14)
   }
 
-  /** 渐变沉浸遮罩：顶部渐显（同 Settings.ets / Index「我的」范式） */
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', tabletTopFadeStop(98)], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
-  }
-
   /** 开关行（图标 + 标题 + 灰字说明 + 开关；卡片与内距同 UsageHabitsPage） */
   @Builder
   SwitchRow(icon: Resource, title: string, subtitle: string, isOn: boolean, onChange: (isOn: boolean) => void) {
@@ -182,6 +177,6 @@ struct AutoSignSettings {
     .width('100%')
     .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.md, bottom: Spacing.md })
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(Radius.lg)
+    .borderRadius(Radius.lg * this.cardRadiusScale)
   }
 }

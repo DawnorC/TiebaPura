@@ -29,7 +29,12 @@ import { CategoryMapping, FavCategory, FolderItem, PostCardItem, PersonalContent
 import { TiebaService } from '../service/TiebaService';
 import { AuthManager } from '../service/AuthManager';
 import { FavoriteStore, CATEGORY_DEFAULT_ID, BackupFolder, BackupImportSummary, BackupPayload } from '../service/FavoriteStore';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, isWideBarDevice, isLargeFoldDevice, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns, isLargeScreenForm, isWideBarFullscreen } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, isWideBarDevice,
+  isLargeFoldDevice, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns,
+  isLargeScreenForm, isWideBarFullscreen,
+  DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { LoadingView, EmptyView, ErrorView, ThreadSharePayload } from '../components/CommonComponents';
 import { ListRowSkeleton } from '../components/Skeleton';
 import { FavCategoryPicker } from '../components/FavCategoryPicker';
@@ -39,6 +44,8 @@ import { ShareUtil } from '../common/ShareUtil';
 import { compareByName } from '../common/Pinyin';
 import { PrefetchGate } from '../common/PrefetchGate';
 import { PerfTrace } from '../common/PerfTrace';
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 import {
   ImmersiveReadSensor, IMMERSIVE_EXTRA_FLY_SCALE, IMMERSIVE_EXTRA_HIDE_MS, IMMERSIVE_EXTRA_SHOW_MS,
   IMMERSIVE_EXTRA_SPRING_RESPONSE, IMMERSIVE_EXTRA_SPRING_DAMPING
@@ -643,6 +650,8 @@ struct ExportDialogCard {
  */
 @Component
 export struct FavoriteTab {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
   @State @Watch('syncBackState') categoryTab: number = lastCategoryTab;
   @State @Watch('syncBackState') selectedForum: string = lastSelectedForum;
   @State folders: FolderItem[] = [];
@@ -2271,7 +2280,7 @@ export struct FavoriteTab {
     .padding({ top: 10, bottom: 10 })
     .backgroundColor(Theme.bgCard(this.isDark))
     // 卡片圆角 26：与收藏页其余卡片、首页 ThreadCard、详情页卡片统一口径（不借用全局 Radius.lg）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
   }
 
   /** v1.12 恢复列表滚动位置：List 重建（if/else 切换销毁）后 onAppear 调用，offset<=0 跳过 */
@@ -3384,9 +3393,6 @@ export struct FavoriteTab {
       if (!this.searchMode && this.editMode && (this.selectedForum.length > 0 || this.selectedCategoryId.length > 0)) {
         this.EditBar()
       }
-      // §4.3 真机三次修复（2026-09-14）：顶部满宽渐显带改 Stack 顶层背景色渐变条（zIndex 8）——
-      // 盖住各列表内容顶部（视觉渐隐），低于 EditBar(15) / 兜底胶囊行(13)，槽位顶栏在 Navigation title 层更高
-      this.TopFadeBand()
       /**
        * 移入分类面板（§6.8 系统半模态）：UI / 勾选 / 新建分类已收敛到共用组件 FavCategoryPicker，
        * 组件自身 0×0 不参与本页布局，`bindSheet` 挂在组件内部（见 components/FavCategoryPicker.ets）。
@@ -3419,7 +3425,6 @@ export struct FavoriteTab {
         .hitTestBehavior(HitTestMode.None)
         .bindMenu(this.showSortMenu, this.SortMenuContent(), {
           placement: Placement.BottomRight,
-          targetSpace: LengthMetrics.vp(0),
           systemMaterial: ImmMaterial.menu(),
           onDisappear: () => { this.showSortMenu = false; }
         })
@@ -3454,6 +3459,11 @@ export struct FavoriteTab {
       this.pageHeight = h;
     })
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    // 顶部真·渐变模糊（对齐「消息/我的」范式）：挂全高根 Stack，渐变带从 y=0 起覆盖
+    // 状态栏+标题区；帖子流/搜索结果经各滚动容器 clip(false) 上溢穿过顶栏下方时被渐进模糊
+    // （替代已删除的 GradientBlurBar 纯色渐变条假遮罩）。
+    .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+    .overlay(() => { TopGlassVeil() })
   }
 
   @Builder
@@ -3760,7 +3770,7 @@ export struct FavoriteTab {
     .padding(Spacing.lg)
     .backgroundColor(Theme.bgCard(this.isDark))
     // 卡片圆角 26：与收藏页其余卡片、首页 ThreadCard、详情页卡片统一口径（不借用全局 Radius.lg）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .accessibilityText(`${folder.forumName}，${folder.threadCount} 个收藏${folder.pinned ? '，已置顶' : ''}`)
     .accessibilityDescription('点击进入，长按置顶或取消置顶')
     .onClick(() => {
@@ -3994,7 +4004,7 @@ export struct FavoriteTab {
     .padding(Spacing.lg)
     .backgroundColor(Theme.bgCard(this.isDark))
     // 卡片圆角 26：与收藏页其余卡片、首页 ThreadCard、详情页卡片统一口径（不借用全局 Radius.lg）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .accessibilityText(`${card.title || '楼主暂无标题'}，作者 ${card.author}，${card.replyNum} 回复${card.pinned ? '，已置顶' : ''}`)
     .accessibilityDescription(this.editMode ? '点击切换勾选' : '点击打开详情，长按进入编辑')
     .onClick(() => {
@@ -4538,7 +4548,7 @@ export struct FavoriteTab {
       .padding(Spacing.lg)
       .backgroundColor(Theme.bgCard(this.isDark))
       // 卡片圆角 26：与收藏页其余卡片统一（不借用全局 Radius.lg）
-      .borderRadius(26)
+      .borderRadius(26 * this.cardRadiusScale)
       .accessibilityText('新建分类')
       .onClick(() => { this.beginCreateCategory(); })
     }
@@ -4619,7 +4629,7 @@ export struct FavoriteTab {
       ? { radius: 12, color: '#333477FF', offsetY: 2 }
       : { radius: 0, color: Color.Transparent, offsetY: 0 })
     // 卡片圆角 26：与收藏页其余卡片统一（不借用全局 Radius.lg）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .accessibilityText(`${cat.name}，${count} 个收藏`)
     .accessibilityDescription(editable ? '点击进入，点击右侧图标管理（重命名/删除），长按可拖拽排序' : '点击进入')
     .onClick(() => {
@@ -4668,7 +4678,7 @@ export struct FavoriteTab {
       .padding(Spacing.lg)
       .backgroundColor(Theme.bgCard(this.isDark))
       // 圆角 26：与静态分类卡一致，拖拽抬起/落下时圆角不跳变
-      .borderRadius(26)
+      .borderRadius(26 * this.cardRadiusScale)
     }
     .width('100%')
     // 外层 padding 复刻 List.padding(Spacing.lg)：保证预览卡左右缩进与静态卡一致
@@ -4701,7 +4711,7 @@ export struct FavoriteTab {
     .padding(Spacing.lg)
     .backgroundColor(Theme.bgCard(this.isDark))
     // 圆角 26：与静态帖子卡一致，拖拽抬起/落下时圆角不跳变
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .scale({ x: 1.05, y: 1.05 })
     .shadow({ radius: 24, color: '#40000000', offsetY: 8 })
   }
@@ -5542,7 +5552,7 @@ export struct FavoriteTab {
     }
     .width(210)
     .padding({ left: 16, right: 16, top: 13, bottom: 13 })
-    .borderRadius(Radius.md)
+    .borderRadius(Radius.md * this.cardRadiusScale)
     .onClick(() => { this.applySortMode(mode, disabled); })
   }
 
@@ -5614,32 +5624,5 @@ export struct FavoriteTab {
     .padding({ left: Spacing.md, right: Spacing.md, top: 12, bottom: 12 })
     .accessibilityText(title)
     .onClick(onTap)
-  }
-
-  /**
-   * 顶部满宽渐显带（真机三次修复终版，2026-09-14）：原「整页 DST_IN 遮罩 + blendMode OFFSCREEN」方案的
-   * 离屏层宽度在手机上解析异常——四个界面渐显带右缘同缺一条竖带、平板正常（Refresh 全宽 / 挂点回迁均无效）
-   * → 改为 **Stack 顶层满宽背景色渐变条**（ThreadList TopFadeBand 成品同款思路）：
-   * 下层是纯背景色，背景色渐变条叠加 = 视觉等价渐隐，宽度跟随 FavContent Stack（全宽已被页面背景实证），
-   * 彻底不依赖列表宿主宽度解析。
-   * 高 132 = TopBar 98 + 分段切换区 ~34（只盖按钮与标题区，用户拍板口径）；hitTestBehavior(None) 不挡交互；
-   * zIndex 8：盖住列表内容，低于 EditBar(15) / 兜底 CategoryTabs(13)，槽位顶栏在 Navigation title 层更高。
-   * 渐变**从顶部即线性渐变、无全实段**（真机四修，2026-09-14）：首版 [bg,0]→[bg,0.5]→[透明,1] 的前半段
-   * 全实背景色会让内容一进条顶就被盖死（硬切感，用户真机驳回）——改 [bg,0]→[transparent,1] 线性后与
-   * 首页挖洞式「内容从顶栏下渐现」观感一致。
-   */
-  @Builder
-  TopFadeBand() {
-    Column()
-      .width('100%')
-      .height(132)
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [
-          [Theme.bg(this.isDark), 0.0],
-          [this.isDark ? '#00101114' : '#00F2F4F7', 1.0]
-        ]
-      })
-      .hitTestBehavior(HitTestMode.None)
   }
 }

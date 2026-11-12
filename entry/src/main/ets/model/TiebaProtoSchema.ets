@@ -445,6 +445,28 @@ export interface FrsTabInfoMessage {
   isDefault?: number;
 }
 
+export interface FrsThemeElement {
+  commonColor?: string;
+  darkColor?: string;
+}
+
+export interface FrsForumTheme {
+  day?: FrsThemeElement;
+  night?: FrsThemeElement;
+  dark?: FrsThemeElement;
+}
+
+export interface FrsHeaderArt {
+  url: string;
+  color: string;
+}
+
+export interface FrsSignUser {
+  userId?: number;
+  isSignIn?: number;
+  consecutiveDays?: number;
+}
+
 export interface FrsForumMessage {
   id?: number;
   name?: string;
@@ -462,6 +484,8 @@ export interface FrsForumMessage {
   levelupScore?: number;
   avatar?: string;
   slogan?: string;
+  signUser?: FrsSignUser;
+  themeColor?: FrsForumTheme;
   fShareImg?: string;
   forumShareLink?: string;
   /** 精选二级分类（ForumInfo.good_classify，field 21；2026-09-20 精选分类页探针实测） */
@@ -488,6 +512,7 @@ export interface FrsNavTabInfoMessage {
 }
 
 export interface FrsPageResponseDataMessage {
+  headerArt?: FrsHeaderArt;
   user?: UserMessage;
   forum?: FrsForumMessage;
   page?: PageMessage;

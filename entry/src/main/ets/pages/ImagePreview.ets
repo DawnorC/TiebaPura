@@ -1,4 +1,4 @@
-﻿/*
+/*
  * TiebaPura - HarmonyOS 原生 ArkTS 实现的第三方百度贴吧客户端
  * Copyright (C) 2026 a307608689-afk
  *
@@ -25,7 +25,7 @@ import { HttpClient } from '../network/HttpClient';
 import { TiebaService, ThreadDetailResult } from '../service/TiebaService';
 import { FloorItem } from '../model/DataModel';
 import { ImageCache, acquireImagePreloadSlot, releaseImagePreloadSlot } from '../cache/ImageCache';
-import { Theme, Spacing, Radius, isDarkMode, MaterialManager, fs } from '../common/Theme';
+import { Theme, Spacing, Radius, isDarkMode, MaterialManager, fs, DEFAULT_CARD_RADIUS_SCALE } from '../common/Theme';
 import { PerfTrace } from '../common/PerfTrace';
 
 /**
@@ -78,6 +78,7 @@ export function previewMorphCloseAnim(): AnimateParam {
  */
 @Component
 export struct PreviewView {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
   /** 路由/宿主透传参数（urls/index/tid/sortType/seeLz/forumId/commentRn/loadedPage/totalPage） */
   previewParams: Record<string, Object> | undefined = undefined;
   /** 关闭请求（宿主置 true）：@Watch 复位缩放后回调 onClose */
@@ -404,7 +405,7 @@ export struct PreviewView {
             .border({ width: 0.5, color: Theme.glassControlLine(true) })
             .shadow({ radius: 8, color: '#33000000', offsetY: 1 })
             // 圆角 26：与全局卡片统一口径（本胶囊高约 28vp，圆角已被裁为全圆，视觉不变）
-            .borderRadius(26)
+            .borderRadius(26 * this.cardRadiusScale)
             .padding({ left: 12, right: 12, top: 4, bottom: 4 })
 
             Blank()
@@ -1008,5 +1009,6 @@ struct ImagePreview {
     }
     .width('100%')
     .height('100%')
+    .id('image_preview_page')
   }
 }

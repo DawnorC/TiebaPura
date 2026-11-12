@@ -18,11 +18,15 @@
 
 import { AuthManager } from '../service/AuthManager';
 import { TiebaService } from '../service/TiebaService';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs,
+  DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 
 @Entry
 @Component
 struct ComposeThread {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
   @State forumName: string = '';
   @State forumId: string = '';
   @State title: string = '';
@@ -38,6 +42,10 @@ struct ComposeThread {
     this.fontSizeTick++;
   }
 
+  onBackPress(): boolean {
+    return this.publishing;
+  }
+
   aboutToAppear(): void {
     MaterialManager.init();
     const params = this.getUIContext().getRouter().getParams() as Record<string, string>;
@@ -51,6 +59,9 @@ struct ComposeThread {
   }
 
   private async publish(): Promise<void> {
+    if (this.publishing) {
+      return;
+    }
     if (!AuthManager.getInstance().isLogin()) {
       this.getUIContext().getPromptAction().showToast({ message: '请先登录贴吧账号' });
       return;
@@ -100,6 +111,7 @@ struct ComposeThread {
         .shadow(Theme.glassShadowStyle()).backgroundEffect(ImmBlur.control())
         .systemMaterial(ImmMaterial.control())
         .borderRadius(Radius.full)
+        .enabled(!this.publishing)
         .onClick(() => this.getUIContext().getRouter().back())
 
         Text(`发布到 ${this.forumName}吧`)
@@ -115,43 +127,45 @@ struct ComposeThread {
 
       Column({ space: Spacing.md }) {
         TextInput({ placeholder: '主题标题', text: this.title })
+          .id('compose_thread_title')
           .width('100%')
           .height(48)
+          .enabled(!this.publishing)
+          .maxLength(100)
           .fontSize(fs(16, this.fontScale))
           .fontColor(Theme.textPrimary(this.isDark))
           .backgroundColor(Theme.bgElevated(this.isDark))
-          .borderRadius(Radius.md)
+          .borderRadius(Radius.md * this.cardRadiusScale)
           .onChange((value: string) => {
             this.title = value;
             this.pendingPublish = false;
           })
 
-        TextInput({ placeholder: '写下主题内容', text: this.content })
+        TextArea({ placeholder: '写下主题内容', text: this.content })
+          .id('compose_thread_content')
           .width('100%')
           .height(220)
+          .enabled(!this.publishing)
+          .maxLength(10000)
           .fontSize(fs(15, this.fontScale))
           .fontColor(Theme.textPrimary(this.isDark))
           .backgroundColor(Theme.bgElevated(this.isDark))
-          .borderRadius(Radius.md)
+          .borderRadius(Radius.md * this.cardRadiusScale)
           .textAlign(TextAlign.Start)
           .onChange((value: string) => {
             this.content = value;
             this.pendingPublish = false;
           })
 
-        Text('发布请求会携带当前登录 Cookie，并由贴吧服务端校验 tbs、权限和风控状态。')
-          .fontSize(fs(12, this.fontScale))
-          .fontColor(Theme.textSecondary(this.isDark))
-          .width('100%')
-
         Button(this.publishing ? '发布中' : (this.pendingPublish ? '确认发布' : '发布主题'))
+          .id('compose_thread_submit')
           .width('100%')
           .height(46)
           .fontSize(fs(15, this.fontScale))
           .fontColor(Color.White)
           .backgroundColor(this.pendingPublish ? Theme.success() : Theme.brand())
           .borderRadius(Radius.full)
-          .enabled(!this.publishing)
+          .enabled(!this.publishing && this.title.trim().length > 0 && this.content.trim().length > 0)
           .onClick(() => this.publish())
       }
       .width('100%')

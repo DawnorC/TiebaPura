@@ -57,10 +57,14 @@ export class ProtoSchema {
     if (isGood !== undefined) requestData.writeVarint(4, Number(isGood));
     const cid = data.get('cid');
     if (cid !== undefined) requestData.writeVarint(5, Number(cid));
+    const withCal = data.get('withcal');
+    if (withCal !== undefined) requestData.writeVarint(6, Number(withCal));
     const pn = data.get('pn');
     if (pn !== undefined) requestData.writeVarint(15, Number(pn));
     const sortType = data.get('sort_type');
     if (sortType !== undefined) requestData.writeVarint(47, Number(sortType));
+    const isNewFrs = data.get('is_newfrs');
+    if (isNewFrs !== undefined) requestData.writeVarint(73, Number(isNewFrs));
     requestData.writeMessage(39, common);
     const request = new ProtoWriter();
     request.writeMessage(1, requestData.toArrayBuffer());
@@ -99,6 +103,28 @@ export class ProtoSchema {
     dataWriter.writeMessage(9, common);
     const request = new ProtoWriter();
     request.writeMessage(1, dataWriter.toArrayBuffer());
+    return request.toArrayBuffer();
+  }
+
+  static addSubPostReplyRequest(tid: string, fid: string, forumName: string, content: string, tbs: string,
+    floorId: string, commentId: string, replyUserId: string, common: ArrayBuffer): ArrayBuffer {
+    const data = new ProtoWriter();
+    data.writeMessage(1, common);
+    data.writeString(4, tbs);
+    data.writeString(6, '1');
+    data.writeString(16, '12');
+    data.writeString(18, '1');
+    data.writeString(19, content);
+    data.writeString(20, replyUserId);
+    data.writeString(26, fid);
+    data.writeString(30, forumName);
+    data.writeString(45, tid);
+    data.writeString(46, floorId);
+    data.writeString(48, '0');
+    data.writeString(49, floorId);
+    data.writeString(50, commentId);
+    const request = new ProtoWriter();
+    request.writeMessage(1, data.toArrayBuffer());
     return request.toArrayBuffer();
   }
 

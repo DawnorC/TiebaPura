@@ -21,9 +21,15 @@ import { display } from '@kit.ArkUI';
 import { TiebaService } from '../service/TiebaService';
 import { AuthManager } from '../service/AuthManager';
 import { Conversation } from '../model/DataModel';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, isWideFormDevice as detectWideFormDevice } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs,
+  isWideFormDevice as detectWideFormDevice,
+  DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { LoadingView, EmptyView, ErrorView } from '../components/CommonComponents';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 enum LoadState {
   Loading, Success, Empty, Error,
 }
@@ -31,6 +37,8 @@ enum LoadState {
 @Entry
 @Component
 struct Message {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
   /**
    * 顶部渐显带收窄（2026-09-13 用户反馈）：平板竖屏下原 15% 渐显覆盖到第一个卡片中部，
    * 要求「只覆盖顶部按钮与标题」→ 平板档覆盖高度 = 顶栏 98vp，手机维持原比例。
@@ -139,7 +147,7 @@ struct Message {
               .width('100%')
               .padding(Spacing.lg)
               .backgroundColor(Theme.bgCard(this.isDark))
-              .borderRadius(Radius.lg)
+              .borderRadius(Radius.lg * this.cardRadiusScale)
               .onClick(() => {
                 this.getUIContext().getPromptAction().showToast({ message: '私信会话需接入聊天接口' });
               })
@@ -152,8 +160,8 @@ struct Message {
         .scrollBar(BarState.Off)
         .clip(false)
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-        .overlay(this.BottomFadeOverlay())
-        .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+        .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+        .overlay(() => { TopGlassVeil() })
       }
 
       // 悬浮顶栏（内容可穿过）
@@ -181,26 +189,5 @@ struct Message {
     .height('100%')
     .backgroundColor(Theme.bg(this.isDark))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-  }
-
-  /** 顶部渐显覆盖比例（2026-09-13）：平板只覆盖顶部按钮与标题（98vp 折算），手机维持 15% */
-  private topFadeStop(): number {
-    if (!this.isWideFormDevice || this.fadeCoverVp <= 0) {
-      return 0.15;
-    }
-    return Math.min(0.15, 98 / this.fadeCoverVp);
-  }
-
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', this.topFadeStop()], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
   }
 }

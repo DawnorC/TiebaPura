@@ -17,7 +17,11 @@
  */
 
 import { LengthMetrics } from '@kit.ArkUI';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop, overlayCardWidth } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop,
+  overlayCardWidth,
+  DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { ToastUtil, ToastType } from '../common/ToastUtil';
 import { Haptic } from '../common/Haptic';
 import { TiebaService, BlacklistPermOptions } from '../service/TiebaService';
@@ -29,6 +33,9 @@ import { compareByName } from '../common/Pinyin';
 import { EmptyView, ErrorView } from '../components/CommonComponents';
 import { ListRowSkeleton } from '../components/Skeleton';
 
+
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 /** 黑名单排序模式（同收藏页 v1.11 范式，去「自定义排序」；默认 TimeDesc = 最新拉黑） */
 enum BlackSortMode {
   NameAsc = 0,
@@ -54,6 +61,10 @@ enum LoadState {
 @Entry
 @Component
 struct BlacklistManager {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  /** 页面边距（左右留白，实时同步；16=默认，0=贴边） */
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   @State isDark: boolean = isDarkMode();
   @State list: BlacklistItem[] = [];
   @State loadState: LoadState = LoadState.Loading;
@@ -472,12 +483,12 @@ struct BlacklistManager {
               }, (item: BlacklistItem) => item.userId)
             }
             .width('100%')
-            .padding({ left: Spacing.lg, right: Spacing.lg, bottom: Spacing.xl })
+            .padding({ left: this.pageMargin, right: this.pageMargin, bottom: Spacing.xl })
             .scrollBar(BarState.Off)
             .edgeEffect(EdgeEffect.Spring)
             .onReachEnd(() => { this.loadMore(); })
-            .overlay(this.BottomFadeOverlay())
-            .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+            .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+            .overlay(() => { TopGlassVeil() })
           }
           .width('100%')
           .layoutWeight(1)
@@ -507,7 +518,6 @@ struct BlacklistManager {
         .hitTestBehavior(HitTestMode.None)
         .bindMenu(this.showSortMenu, this.SortMenuContent(), {
           placement: Placement.BottomRight,
-          targetSpace: LengthMetrics.vp(0),
           systemMaterial: ImmMaterial.menu(),
           onDisappear: () => { this.showSortMenu = false; }
         })
@@ -615,20 +625,6 @@ struct BlacklistManager {
     .zIndex(14)
   }
 
-  /** 渐变沉浸遮罩：顶部渐显（同 Settings.ets / Index「我的」范式） */
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', tabletTopFadeStop(98)], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
-  }
-
   /** 列表行：设置页 SettingItem 同款卡片（头像 40vp 圆角 / 昵称 + ID·拉黑时间 / 右箭头），编辑态圈选 */
   @Builder
   BlackItemRow(item: BlacklistItem) {
@@ -694,7 +690,7 @@ struct BlacklistManager {
     .width('100%')
     .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.md, bottom: Spacing.md })
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(Radius.lg)
+    .borderRadius(Radius.lg * this.cardRadiusScale)
     .accessibilityText(item.name || item.userId || '未知用户')
     .accessibilityDescription(this.editMode ? '点击切换勾选' : '点击编辑屏蔽设置')
     .onClick(() => {
@@ -790,7 +786,7 @@ struct BlacklistManager {
     }
     .width(210)
     .padding({ left: 16, right: 16, top: 13, bottom: 13 })
-    .borderRadius(Radius.md)
+    .borderRadius(Radius.md * this.cardRadiusScale)
     .onClick(() => { this.applySortMode(mode); })
   }
 
@@ -868,7 +864,7 @@ struct BlacklistManager {
       .backgroundColor(Theme.sheetBg(this.isDark))
       .shadow(Theme.glassShadowStyle()).backgroundEffect(ImmBlur.control())
       .systemMaterial(ImmMaterial.control())
-      .borderRadius(32)
+      .borderRadius(32 * this.cardRadiusScale)
       .border({ width: { top: 1.5 }, color: Theme.sheetTopGlow(this.isDark) })
       .shadow({ radius: 48, color: '#3D000000', offsetY: 18 })
       .transition(TransitionEffect.scale({ x: 0.92, y: 0.92 }).combine(TransitionEffect.translate({ y: 24 })).combine(TransitionEffect.opacity(0)).animation({ duration: 220, curve: Curve.EaseOut }))
@@ -973,7 +969,7 @@ struct BlacklistManager {
       .backgroundColor(Theme.sheetBg(this.isDark))
       .shadow(Theme.glassShadowStyle()).backgroundEffect(ImmBlur.control())
       .systemMaterial(ImmMaterial.control())
-      .borderRadius(32)
+      .borderRadius(32 * this.cardRadiusScale)
       .border({ width: { top: 1.5 }, color: Theme.sheetTopGlow(this.isDark) })
       .shadow({ radius: 48, color: '#3D000000', offsetY: 18 })
       .transition(TransitionEffect.scale({ x: 0.92, y: 0.92 }).combine(TransitionEffect.translate({ y: 24 })).combine(TransitionEffect.opacity(0)).animation({ duration: 220, curve: Curve.EaseOut }))

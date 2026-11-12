@@ -22,15 +22,22 @@ import { systemShare } from '@kit.ShareKit';
 import { uniformTypeDescriptor as utd } from '@kit.ArkData';
 import { bundleManager, common, Want } from '@kit.AbilityKit';
 import { pasteboard, BusinessError, deviceInfo } from '@kit.BasicServicesKit';
-import { TiebaService } from '../service/TiebaService';
+import { ReplyTarget, TiebaService } from '../service/TiebaService';
 import { AuthManager } from '../service/AuthManager';
 import { CacheManager } from '../cache/CacheManager';
-import { CACHE_KEY } from '../common/Constants';
+import { SubPostReplyPanel, SubPostPanelRequest } from './SubPostDetail';
+import { FixedPageBars } from '../components/FixedPageBars';
+import { BottomBarBackdrop } from '../components/BottomBarBackdrop';
+import { CACHE_KEY, THREAD_COMMENT_PREVIEW_COUNT } from '../common/Constants';
 import { FavoriteStore, CATEGORY_DEFAULT_ID } from '../service/FavoriteStore';
 import { HistoryStore } from '../service/HistoryStore';
-import { ThreadDetail as ThreadDetailModel, FloorItem, CommentItem, SubPostDetail, PersonalContentItem, ContentFragment, ContentFragmentType, FavCategory, CategoryMapping } from '../model/DataModel';
+import { ThreadDetail as ThreadDetailModel, FloorItem, CommentItem, SubPostDetail, PersonalContentItem, ContentFragment, ContentFragmentType, FavCategory, CategoryMapping, UserProfileModel } from '../model/DataModel';
 import { ThreadDetailResult } from '../service/TiebaService';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, Breakpoint, isWideBarDevice, isLargeFoldDevice, isPuraXMaxDevice, overlayCardWidth, isWideFormDevice as detectWideFormDevice } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, Breakpoint, isWideBarDevice,
+  isLargeFoldDevice, isPuraXMaxDevice, overlayCardWidth, isWideFormDevice as detectWideFormDevice,
+  DEFAULT_CARD_RADIUS_SCALE, FLOATING_DOCK_PHONE_HEIGHT, FLOATING_DOCK_PHONE_INSET
+} from '../common/Theme';
 import { ErrorView, ThreadSharePayload, acquireImagePreloadSlot, releaseImagePreloadSlot } from '../components/CommonComponents';
 import { ThreadDetailSkeleton } from '../components/Skeleton';
 import { FavCategoryPicker } from '../components/FavCategoryPicker';
@@ -42,6 +49,8 @@ import { Haptic } from '../common/Haptic';
 import { PerfTrace } from '../common/PerfTrace';
 import image from '@ohos.multimedia.image';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 enum LoadState {
   Loading, Success, Error,
 }
@@ -80,24 +89,8 @@ const FLOORS_FADE_IN_MS: number = 200;
 /** 2026-09-20（分区上屏）：楼层区淡入的启动延迟——楼主卡先落定，回复流随后进场 */
 const FLOORS_FADE_DELAY_MS: number = 120;
 
-/**
- * 排序胶囊（正序 / 只看全部）官方槽位开关（2026-09-10）：
- * true  = 两枚胶囊放进「真实 Tabs 的空 tabBar 槽位」承载。原因：官方 A 档「按钮与选择类」只有
- *         Slider / Toggle / Select，Button/Chip/SegmentButton 全属 B 档，**仅在 Navigation 标题栏与
- *         `Tabs(barPosition: End)` 底部 TabBar 内生效**（官方文档 §4.1/§4.2）；这两枚胶囊悬浮在页面中部，
- *         原写法必判 `Material inactive: out of scope`。搭壳后位置/大小/间距一行未改，只有玻璃来源
- *         从自绘换成官方沉浸材质。
- * false = 回退改造前的 SortRowOverlay 自绘玻璃浮层（segGlass + backgroundBlurStyle 真磨砂）。
- * ⚠️ 待真机验证：「底部 TabBar 槽位**子树**内挂 systemMaterial 是否生效」。此前只有
- *    Navigation 标题栏子树（§1.5）与 CustomDialog 子树（§1.4）被真机验证过；若 hilog 报
- *    `Material inactive: out of scope`，把本开关置 false 即整行回退到旧浮层。
- */
-const THREAD_DETAIL_SORT_OFFICIAL_SLOT: boolean = true;
-/**
- * 排序行高度（vp）= padding top 4 + 胶囊 34 + bottom 8 = 46 ——
- * 与改造前 SortRowOverlay 内 ReplyControls 的实际占高逐项一致，用作 Tabs 壳高与 barHeight。
- */
-const THREAD_DETAIL_SORT_ROW_HEIGHT: number = 46;
+const THREAD_DETAIL_FIXED_BAR_HEIGHT: number = 52;
+const THREAD_REPLY_HEADER_HEIGHT: number = 38;
 
 /**
  * 平板适配 §4.9 DT-I：横屏分栏时的**左栏固定宽度**（vp）= 用户说的「帖子本身宽度」。
@@ -187,8 +180,6 @@ const IMMERSIVE_GLASS_LEAD_MS: number = 16;
  * 首屏补齐延后起跑，让首屏渲染与下一页预取先占住连接池；补齐锁被占时按重试间隔轮询，
  * 保证被 loadMore 抢先的首页楼层最终仍会被补齐（预览点赞不会永久停在 0）。
  */
-const SUBPOST_ENRICH_DELAY_MS: number = 400;
-const SUBPOST_ENRICH_RETRY_MS: number = 400;
 
 /**
  * 帖子详情「滚动预取」（2026-09-19，无感翻页）：滚动位置距底部不足该值（vp）时提前消费/触发下一页，
@@ -747,6 +738,8 @@ struct JumpTiebaDialogCard {
 @Entry
 @Component
 struct ThreadDetail {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
   @State tid: string = '';
   @State detail: ThreadDetailModel | null = null;
   @State floors: FloorItem[] = [];
@@ -756,9 +749,12 @@ struct ThreadDetail {
   @State errorMsg: string = '';
   @State isDark: boolean = isDarkMode();
   @State commentText: string = '';
-  @State replyTarget: string = '';   // 回复目标（楼层作者）
+  @State replyTarget: ReplyTarget | null = null;
+  @State showReplyEditor: boolean = false;
   @State sending: boolean = false;
   @State pendingReply: boolean = false;
+  private replyDrafts: Map<string, string> = new Map();
+  private replyAfterSubPosts: boolean = false;
   @State readyEmojiUrls: string[] = []; // EmojiLoader 下载转 PixelMap 成功的 URL（有这个就有 PixelMap 可 ImageSpan 渲染）
   @State failedEmojiUrls: string[] = []; // EmojiLoader 下载失败的 URL → 兜底显示中文文本
   /**
@@ -846,6 +842,12 @@ struct ThreadDetail {
   @State seeLz: boolean = false;
   @State liked: boolean = false;
   @State collected: boolean = false;
+  // 官方样式·关注按钮（2026-11-10）：作者关注态懒加载（详情落地后拉一次 profile 取 isFollowed
+  // 与关注接口所需的 portrait hash），按钮落在主楼头部右侧，未关注实心品牌蓝、已关注灰描边。
+  @State authorFollowed: boolean = false;
+  @State followBusy: boolean = false;
+  private authorPortrait: string = '';
+  private followProbeAuthorId: string = '';
   /**
    * 长按收藏钮 → 分类面板（复用 components/FavCategoryPicker，§6.8 系统半模态）。
    * 副作用边界（用户拍板方案 A）：面板内只做勾选 / 新建分类，**不写库**；只有「完成」回调
@@ -863,9 +865,10 @@ struct ThreadDetail {
   @State pickerTargets: string[] = [];
   /** 面板落库账号（打开面板时取自 AuthManager，@Prop 传给组件供新建分类写入） */
   @State pickerAccountId: string = '';
-  @State commentRn: number = 3;
+  @State commentRn: number = THREAD_COMMENT_PREVIEW_COUNT;
   @State commentLoading: boolean = false;
-  @State openingSubPost: boolean = false;
+  @State showSubPosts: boolean = false;
+  @State subPostRequest: SubPostPanelRequest | null = null;
   // ===== 一镜到底图片预览（2026-09-27 v2 自绘飞行层方案）=====
   // 预览为全屏模态（bindContentCover，瞬开瞬收）；morph 由本页自绘飞行层完成——
   // 单一图片节点装在「格子矩形 → Contain 矩形」插值的 Cover 容器里，两端与真实内容
@@ -909,11 +912,6 @@ struct ThreadDetail {
   @State morphFollowY: number = 0;
   /** morph 起点的滚动位置：关闭/打断时捕获，跟随量 = -(当前 - 起点) */
   private morphStartScrollY: number = 0;
-  // 楼中楼预览点赞补齐：本会话已通过 pb/floor 校正过点赞的楼层集合（避免重复请求）
-  private subPostLikesFetched: Set<string> = new Set<string>();
-  private enrichingSubPostLikes: boolean = false;
-  // §Z4a：首屏缺赞补齐的延后调度器（-1 表示空闲）
-  private enrichTimer: number = -1;
   // 分页加载楼层：currentPage 追踪当前已加载到第几页，loadingMore 防止重复请求
   @State currentPage: number = 1;
   @State loadingMore: boolean = false;
@@ -932,6 +930,10 @@ struct ThreadDetail {
   /** 上次触发预取的滚动偏移（-1 = 未触发过）：节流用 */
   private lastPrefetchY: number = -1;
   @StorageLink('fontScale') fontScale: number = 1.0;
+  @StorageLink('floatingPageBars') floatingPageBars: boolean = true;
+  @StorageLink('bottomBarBackdrop') bottomBarBackdrop: boolean = false;
+  /** 楼中楼回复整体缩放比例（0.7~1.2，缺省 0.9）：小于 1 即整体缩小（设置页可调） */
+  @StorageLink('subReplyScale') subReplyScale: number = 0.9;
   /** 页面可见时自增，强制组件重建使字号实时生效 */
   @State fontSizeTick: number = 0;
   // 骨架屏→内容过渡（2026-09-20 A+C 接力式）：内容初始透明 + 上浮，骨架退场后落定进场
@@ -1138,13 +1140,17 @@ struct ThreadDetail {
       return;
     }
     this.detail = result.detail;
-    this.floors = result.floors;
-    // P4：floors 整体替换同步重排挂载前缀（首装取 INITIAL 批；补水/刷新保留已增长量）
-    this.resetFloorMount();
-    this.floorDataSource.setData(result.floors);
-    this.totalFloorPage = result.detail.totalPage ?? 1;
-    this.hasMoreFloors = this.currentPage < this.totalFloorPage;
+    // 缓存首屏显示后，用户可能已翻页。后台第 1 页刷新不能覆盖已追加的楼层和游标。
+    if (this.currentPage === 1) {
+      this.floors = result.floors;
+      this.resetFloorMount();
+      this.floorDataSource.setData(result.floors);
+      this.totalFloorPage = result.detail.totalPage ?? 1;
+      this.hasMoreFloors = this.currentPage < this.totalFloorPage;
+    }
     this.liked = result.detail.isLiked === true;
+    // 官方样式·关注态懒加载：详情落地即拉作者 profile（一次/作者，取 isFollowed + portrait）
+    this.lazyProbeAuthorFollow();
     if (result.detail.forumName.length > 0) {
       this.forumName = result.detail.forumName;
     }
@@ -1270,7 +1276,8 @@ struct ThreadDetail {
         return false;
       }
       const currentY = this.scroller.currentOffset().yOffset;
-      const targetY = targetRect.windowOffset.y - scrollRect.windowOffset.y + currentY;
+      const targetY = this.getUIContext().px2vp(targetRect.windowOffset.y - scrollRect.windowOffset.y)
+        + currentY - this.replyViewportInset();
       this.highlightFloorId = floorId;
       this.scroller.scrollTo({ xOffset: 0, yOffset: Math.max(0, targetY), animation: true });
       setTimeout(() => {
@@ -1465,11 +1472,15 @@ struct ThreadDetail {
    * 发起首屏详情请求（合流版）：单独成方法以便与磁盘缓存读并行发出（§Z1）。
    * §P0-1：点击时起的预取若仍在途，合流版直接等它，不另发一次同参请求。
    */
-  private startDetailRequest(): Promise<ThreadDetailResult> {
+  private startDetailRequest(generation: number): Promise<ThreadDetailResult> {
     return TiebaService.getInstance().fetchThreadDetailCoalesced(
       this.tid, 1, this.sortType, this.seeLz, this.forumId, this.commentRn, 0, '',
       // 身份补齐完成后回调：只刷新身份相关字段，不打断用户浏览
-      (merged: ThreadDetailResult) => { this.applyDetailResult(merged); }
+      (merged: ThreadDetailResult) => {
+        if (generation === this.fadeGeneration && this.currentPage === 1 && !this.loadingMore) {
+          this.applyDetailResult(merged);
+        }
+      }
     );
   }
 
@@ -1484,7 +1495,7 @@ struct ThreadDetail {
     // A+C：内容回到上浮起点；作废在途接力动画（切排序/只看楼主/刷新打断上一轮过渡时，
     // 旧定时器不得把新骨架提前收掉或把旧内容推上场）
     this.contentTranslateY = CONTENT_RISE_VP;
-    this.fadeGeneration++;
+    const generation: number = ++this.fadeGeneration;
     this.fadeRelayRunning = false;
     // 分区上屏：楼层区回到未构建态（数据落地后楼主卡先绘制，楼层区由 scheduleFloorsReveal 补齐）
     this.floorsReady = false;
@@ -1500,6 +1511,7 @@ struct ThreadDetail {
     }
     // 重置分页状态
     this.currentPage = 1;
+    this.loadingMore = false;
     this.hasMoreFloors = true;
     // 无感翻页：复位滚动预取节流基线（换帖 / 切排序 / 只看楼主 / 刷新后重新起算，
     // 避免拿上一份内容的偏移做节流判断），并收回可能残留的尾部提示/失败态
@@ -1522,7 +1534,7 @@ struct ThreadDetail {
         this.applyCollectedState(cached);
         this.showCachedContent();
       } else {
-        netPromise = this.startDetailRequest();
+        netPromise = this.startDetailRequest(generation);
         __ta0 = Date.now();
         // 并行窗口内先挂一次拒绝兜底：请求若在「发出→await」之间快速失败（断网等）
         // 不会产生未处理拒绝告警；真实错误仍由下方 try/await 捕获处理。
@@ -1530,6 +1542,9 @@ struct ThreadDetail {
         });
         // 冷启动秒开：磁盘缓存（过期数据也先显示），后台网络刷新校正
         const disk = await TiebaService.getInstance().getThreadDetailFromDisk(this.tid, this.sortType, this.seeLz);
+        if (generation !== this.fadeGeneration) {
+          return;
+        }
         if (disk) {
           __tdCache = 'disk';
           this.applyDetailResult(disk);
@@ -1544,9 +1559,12 @@ struct ThreadDetail {
       // 故 page await cost 仍是整段请求耗时（与改造前同口径，便于 A/B 对比）。
       if (netPromise === null) {
         __ta0 = Date.now();
-        netPromise = this.startDetailRequest();
+        netPromise = this.startDetailRequest(generation);
       }
       const result = await netPromise;
+      if (generation !== this.fadeGeneration) {
+        return;
+      }
       const __ta1: number = Date.now();
       // 残缺空壳刷新判定：接口偶发返回"有标题但正文/楼层全空"的响应，
       // 且页面当前已展示可读内容（通常是缓存秒开成功后的后台刷新）。
@@ -1575,10 +1593,6 @@ struct ThreadDetail {
         }
         // 分区上屏：楼主卡先绘制，楼层区延迟构建 + 分区淡入
         this.scheduleFloorsReveal();
-        // 楼中楼预览点赞补齐：pb/page 详情接口的楼中楼不含点赞字段，
-        // 对含楼中楼的楼层静默调用 pb/floor 校正预览点赞数/已赞状态
-        // §Z4a：延后起跑（见 scheduleSubPostPreviewEnrich），不与首屏渲染/下一页预取抢连接
-        this.scheduleSubPostPreviewEnrich();
         // 浏览历史已在 applyDetailResult 里记录（覆盖缓存秒开 / 网络两条路径，且每页只写一次）
         // 预取下一页楼层：滚动翻页时直接命中缓存，减少等待
         if (this.hasMoreFloors) {
@@ -1610,6 +1624,9 @@ struct ThreadDetail {
         }
       }
     } catch (e) {
+      if (generation !== this.fadeGeneration) {
+        return;
+      }
       if (this.detail) {
         // 已有缓存内容可显示（秒开），后台刷新失败时保留缓存内容，不打断浏览
         this.fadeInContent();
@@ -1678,32 +1695,10 @@ struct ThreadDetail {
     }
   }
 
-  /** 直接打开楼中楼详情页并按通知消息的评论 pid 精确定位高亮 */
   private pushNotifySubPost(pid: string, floorNum: number): void {
-    if (this.notifySubPostHandled) {
-      return;
+    if (!this.notifySubPostHandled && this.openSubPostPanel(pid, floorNum, true)) {
+      this.notifySubPostHandled = true;
     }
-    this.notifySubPostHandled = true;
-    this.openingSubPost = true;
-    this.getUIContext().getRouter().pushUrl({
-      url: 'pages/SubPostDetail',
-      params: {
-        tid: this.tid,
-        pid: pid,
-        floor: `${floorNum ?? 0}`,
-        forumId: this.forumId,
-        forumName: this.forumName,
-        notifyReplyerId: this.notifyReplyerId,
-        notifyReplyerName: this.notifyReplyerName,
-        notifyContent: this.notifyContent,
-        notifyCommentPid: this.notifyMsgPostId
-      }
-    }).then(() => {
-      this.openingSubPost = false;
-    }).catch(() => {
-      this.openingSubPost = false;
-      this.getUIContext().getPromptAction().showToast({ message: '楼中楼定位打开失败，请稍后重试' });
-    });
   }
 
   private async recordThreadHistory(detail: ThreadDetailModel, tid: string): Promise<void> {
@@ -1750,6 +1745,8 @@ struct ThreadDetail {
     if (this.loadingMore || !this.hasMoreFloors) {
       return;
     }
+    const generation: number = this.fadeGeneration;
+    let locateNextPage: boolean = false;
     this.loadingMore = true;
     this.beginLoadMoreHint(silent);
     try {
@@ -1761,11 +1758,23 @@ struct ThreadDetail {
         : await TiebaService.getInstance().fetchThreadDetail(
           this.tid, nextPage, this.sortType, this.seeLz, this.forumId, this.commentRn, 0
         );
-      // 追加新楼层到现有列表
-      this.floors = [...this.floors, ...result.floors];
-      this.floorDataSource.append(result.floors);
-      // 新追加楼层同样存在 pb/page 楼中楼无点赞的问题，静默补齐
-      this.enrichSubPostPreviewLikes(result.floors);
+      if (generation !== this.fadeGeneration) {
+        return;
+      }
+      const seen: Set<string> = new Set(this.floors.map((floor: FloorItem): string => floor.floorId));
+      const added: FloorItem[] = result.floors.filter((floor: FloorItem): boolean => {
+        if (seen.has(floor.floorId)) {
+          return false;
+        }
+        seen.add(floor.floorId);
+        return true;
+      });
+      if (added.length === 0 && result.floors.length > 0 && nextPage < result.detail.totalPage) {
+        throw new Error('接口返回了重复的回复页');
+      }
+      this.floors = [...this.floors, ...added];
+      this.floorDataSource.append(added);
+      this.mountFloorsUpTo(this.mountedFloorCount + DETAIL_FLOOR_MOUNT_BATCH);
       this.currentPage = nextPage;
       this.totalFloorPage = result.detail.totalPage ?? this.totalFloorPage;
       this.hasMoreFloors = this.currentPage < this.totalFloorPage;
@@ -1782,7 +1791,7 @@ struct ThreadDetail {
             'locateMORE page=%{public}d floorsLoaded=%{public}d totalFloorPage=%{public}d target=%{public}s notHit tailPids=[%{public}s]',
             this.currentPage, this.floors.length, this.totalFloorPage, this.targetFloorId,
             this.floors.slice(-3).map((f: FloorItem): string => `${f.floorId}`).join(','));
-          this.loadMoreFloors();
+          locateNextPage = true;
         } else if (!this.locateNoticeShown) {
           // 翻到帖子末页仍未命中：给出一次明确提示（可能楼层已被删除/折叠），避免静默落空
           this.locateNoticeShown = true;
@@ -1802,11 +1811,18 @@ struct ThreadDetail {
       }
     } catch (e) {
       // 加载失败时不更新页码，允许重试；后台预取失败保持静默（由触底/滚动兜底重试）
-      this.loadMoreFailed = !silent;
-      console.error('加载更多楼层失败:', (e as Error).message);
+      if (generation === this.fadeGeneration) {
+        this.loadMoreFailed = !silent;
+        console.error('加载更多楼层失败:', (e as Error).message);
+      }
     } finally {
-      this.endLoadMoreHint();
-      this.loadingMore = false;
+      if (generation === this.fadeGeneration) {
+        this.endLoadMoreHint();
+        this.loadingMore = false;
+      }
+    }
+    if (locateNextPage && generation === this.fadeGeneration) {
+      this.loadMoreFloors();
     }
   }
 
@@ -1860,7 +1876,7 @@ struct ThreadDetail {
    * 未命中才发网络请求，请求期间对用户完全不可见。
    */
   private onDetailScrollPrefetch(): void {
-    if (this.loadState !== LoadState.Success || this.loadingMore || !this.hasMoreFloors) {
+    if (this.loadState !== LoadState.Success || !this.floorsReady) {
       return;
     }
     if (this.detailContentH <= 0 || this.detailViewportH <= 0) {
@@ -1871,6 +1887,10 @@ struct ThreadDetail {
     try {
       y = this.scroller.currentOffset().yOffset;
     } catch (e) {
+      return;
+    }
+    this.maybeMountMoreFloors(y);
+    if (this.mountedFloorCount < this.floors.length || this.loadingMore || !this.hasMoreFloors) {
       return;
     }
     const remaining: number = this.detailContentH - this.detailViewportH - y;
@@ -1885,7 +1905,78 @@ struct ThreadDetail {
     this.loadMoreFloors(true);
   }
 
+  private onFloorScrollEnd(): void {
+    this.resetImmersive();
+    if (!this.floorsReady || this.loadState !== LoadState.Success) {
+      return;
+    }
+    if (this.mountedFloorCount < this.floors.length) {
+      this.mountFloorsUpTo(this.mountedFloorCount + DETAIL_FLOOR_MOUNT_BATCH);
+      return;
+    }
+    this.revealLoadHintOnReachEnd();
+    if (!this.loadingMore && this.hasMoreFloors) {
+      this.loadMoreFloors();
+    }
+  }
+
+  private replyDraftKey(target: ReplyTarget | null): string {
+    return target === null ? 'thread' : target.floorId + '/' + (target.commentId ?? '');
+  }
+
+  private openReplyEditor(target: ReplyTarget | null = null): void {
+    if (this.sending || this.showReplyEditor || this.replyAfterSubPosts) {
+      return;
+    }
+    const previousKey = this.replyDraftKey(this.replyTarget);
+    const nextKey = this.replyDraftKey(target);
+    if (previousKey !== nextKey) {
+      if (this.commentText.length > 0) {
+        this.replyDrafts.set(previousKey, this.commentText);
+      } else {
+        this.replyDrafts.delete(previousKey);
+      }
+      this.commentText = this.replyDrafts.get(nextKey) ?? '';
+    }
+    this.replyTarget = target;
+    this.pendingReply = false;
+    if (this.showSubPosts) {
+      this.replyAfterSubPosts = true;
+      this.showSubPosts = false;
+    } else {
+      this.showReplyEditor = true;
+    }
+  }
+
+  private openSubPostReply(comment?: CommentItem): void {
+    const request = this.subPostRequest;
+    if (!request) {
+      return;
+    }
+    this.openReplyEditor({
+      floorId: request.parentPid,
+      floor: request.parentFloor,
+      author: comment?.author ?? request.parent?.author ?? '',
+      commentId: comment?.commentId,
+      replyUserId: comment?.authorId,
+    });
+  }
+
+  private replyEditorTitle(): string {
+    const target = this.replyTarget;
+    if (target === null) {
+      return '回复帖子';
+    }
+    if (target.commentId !== undefined) {
+      return '回复 ' + target.author;
+    }
+    return target.floor > 0 ? '回复第 ' + target.floor + ' 楼' : '回复楼层';
+  }
+
   async doComment(): Promise<void> {
+    if (this.sending) {
+      return;
+    }
     const content = this.commentText.trim();
     if (content.length === 0) {
       this.getUIContext().getPromptAction().showToast({ message: '请输入评论内容' });
@@ -1902,12 +1993,12 @@ struct ThreadDetail {
     }
     this.sending = true;
     try {
-      const targetForum = this.detail?.forumName ?? this.forumName;
-      const result = await TiebaService.getInstance().publishReply(targetForum, this.tid, content, this.forumId);
+      const targetForum = this.detail?.forumName || this.forumName;
+      const result = await TiebaService.getInstance().publishReply(targetForum, this.tid, content, this.forumId, this.replyTarget);
       this.getUIContext().getPromptAction().showToast({ message: result.message });
       this.commentText = '';
-      this.replyTarget = '';
       this.pendingReply = false;
+      this.showReplyEditor = false;
       // 回帖后强制网络刷新，避免缓存旧内容
       await this.loadDetail(true);
     } catch (e) {
@@ -1918,6 +2009,45 @@ struct ThreadDetail {
     }
   }
 
+  @Builder
+  ReplyEditor() {
+    Column({ space: 12 }) {
+      Text(this.replyEditorTitle())
+        .fontSize(fs(18, this.fontScale))
+        .fontWeight(FontWeight.Bold)
+        .fontColor(Theme.textPrimary(this.isDark))
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+
+      TextArea({ placeholder: '写下你的回复', text: this.commentText })
+        .id('thread_reply_content')
+        .fontSize(fs(15, this.fontScale))
+        .fontColor(Theme.textPrimary(this.isDark))
+        .backgroundColor(Theme.bgElevated(this.isDark))
+        .borderRadius(Radius.md * this.cardRadiusScale)
+        .width('100%')
+        .layoutWeight(1)
+        .enabled(!this.sending)
+        .maxLength(10000)
+        .onChange((value: string) => {
+          this.commentText = value;
+          this.pendingReply = false;
+        })
+
+      Button(this.sending ? '发送中' : (this.pendingReply ? '确认发送' : '发送回复'))
+        .id('thread_reply_submit')
+        .height(44)
+        .width('100%')
+        .backgroundColor(Theme.brand())
+        .enabled(!this.sending && this.commentText.trim().length > 0)
+        .onClick(() => { this.doComment(); })
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ top: 18, left: Spacing.lg, right: Spacing.lg, bottom: Spacing.lg })
+  }
+
   /**
    * 页面主体层：官方壳（底部 Tabs 悬浮条）/ 兜底 Dock + 弹窗浮层；顶栏两条路径共用同一份内容。
    * 内容让位常量未动：Scroll 首项仍是 height(98) 占位，正好等于官方 title bar 高度。
@@ -1925,24 +2055,58 @@ struct ThreadDetail {
   @Builder
   DetailRoot() {
     Stack({ alignContent: Alignment.Bottom }) {
-      // API26+ 真机沉浸光感：官方 Tabs 悬浮条壳 —— 底部 Dock 整体放入 .tabBar() 槽位，
-      // 悬浮条本体挂 barFloatingStyle.systemMaterial 才渲染官方材质（与 Index 首页同一机制）。
-      // 其余环境/设备走原手写叠放路径（布局与定稿完全一致），留作稳定兜底。
-      // （2026-09-13 回退记录：「平板横屏岛与帖子卡左对齐」的岛壳解耦方案（内容层移出 Tabs +
-      // FloatingIslandOnly 纯岛壳）已按用户要求回退 —— 底栏保持居中；官方沉浸材质不变。）
-      if (this.materialSupported) {
+      if (!this.floatingPageBars) {
+        FixedPageBars({
+          topColor: Theme.bgCard(this.isDark),
+          bottomColor: Theme.bgCard(this.isDark),
+          content: () => { this.FixedDetailContent(); }
+        })
+      } else if (this.materialSupported) {
         this.ImmersiveDockShell()
-        if (this.loadState === LoadState.Success && this.detail) {
-          if (THREAD_DETAIL_SORT_OFFICIAL_SLOT) {
-            this.SortPillShell()
-          } else {
-            this.SortRowOverlay()
-          }
-        }
       } else {
         this.ContentLayer()
+        if (this.bottomBarBackdrop && !this.immersiveHidden) {
+          BottomBarBackdrop({ heightVp: this.dockPillHeight() + this.dockBottomMargin() + 16, isDark: this.isDark })
+        }
         this.BottomDock()
       }
+      Column()
+        .width(0)
+        .height(0)
+        .bindSheet($$this.showSubPosts, this.SubPostSheet(), {
+          height: '97%',
+          preferType: SheetType.BOTTOM,
+          showClose: false,
+          dragBar: false,
+          maskColor: '#4D000000',
+          backgroundColor: Theme.bgCard(this.isDark),
+          radius: { topLeft: 14, topRight: 14 },
+          onDisappear: () => {
+            this.showSubPosts = false;
+            if (this.replyAfterSubPosts) {
+              this.replyAfterSubPosts = false;
+              this.showReplyEditor = this.pageAlive;
+            }
+          }
+        })
+      Column()
+        .width(0)
+        .height(0)
+        .bindSheet($$this.showReplyEditor, this.ReplyEditor(), {
+          height: '55%',
+          preferType: SheetType.BOTTOM,
+          showClose: true,
+          backgroundColor: Theme.bgCard(this.isDark),
+          shouldDismiss: (action: SheetDismiss) => {
+            if (!this.sending) {
+              action.dismiss();
+            }
+          },
+          onDisappear: () => {
+            this.showReplyEditor = false;
+            this.pendingReply = false;
+          }
+        })
       /**
        * 长按收藏钮 → 分类面板（共用组件 FavCategoryPicker，§6.8 系统半模态）。
        * 组件自身 0×0 不参与本页布局，`bindSheet` 挂在组件内部；本页只驱动开合（pickerShow），
@@ -2024,8 +2188,9 @@ struct ThreadDetail {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(Theme.bg(this.isDark))
-    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .backgroundColor(Theme.bgCard(this.isDark))
+    .expandSafeArea(this.floatingPageBars ? [SafeAreaType.SYSTEM] : [],
+      this.floatingPageBars ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [])
     .onAreaChange((_oldValue: Area, newValue: Area) => {
       const width = newValue.width as number;
       const height = newValue.height as number;
@@ -2053,8 +2218,23 @@ struct ThreadDetail {
     // onBackPress 拦截（见 onBackPress），飞行层与预览的层级/时序在同树内完全受控。
   }
 
+  @Builder
+  FixedDetailContent() {
+    Column() {
+      this.DetailTopBar(false)
+      Column() {
+        this.ContentLayer()
+      }
+      .width('100%')
+      .layoutWeight(1)
+      this.CommentBar(false)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
   build() {
-    if (THREAD_DETAIL_OFFICIAL_TITLE_BAR && this.materialSupported) {
+    if (this.floatingPageBars && THREAD_DETAIL_OFFICIAL_TITLE_BAR && this.materialSupported) {
       // 官方槽位路径：Navigation + 自定义 title（height 固定 98，与改造前悬浮顶栏几何一致）
       // barStyle STACK：内容区延伸到标题栏之下（官方建议，标题栏材质获得最佳沉浸体验的前提）
       // backgroundColor 显式透明：避免标题栏自带底色压住滚动经过的内容
@@ -2062,7 +2242,7 @@ struct ThreadDetail {
       Navigation() {
         this.DetailRoot()
       }
-      .title({ builder: this.DetailTitleBar(), height: THREAD_DETAIL_TITLE_BAR_HEIGHT },
+      .title({ builder: this.DetailTopBar(true), height: THREAD_DETAIL_TITLE_BAR_HEIGHT },
         { barStyle: BarStyle.STACK, backgroundColor: Color.Transparent })
       .mode(NavigationMode.Stack)
       .hideTitleBar(false)
@@ -2180,9 +2360,7 @@ struct ThreadDetail {
 
   /**
    * 官方悬浮岛 Dock 宽度（vp，形态分档）：
-   * - **手机（含横屏 / 分屏 / 窄窗）**：保持原「屏宽 − 64」（下限 240）**逐像素不变** ——
-   *   ⚠️ 不可对手机封顶：手机屏宽并非都是 360（393vp 等主流机型，「屏宽 − 64」= 329），
-   *   任何平板档封顶值作用于手机都会实实在在收窄手机底栏（用户真机已驳回一次）。
+   * - 手机档与主界面的悬浮胶囊使用相同的左右留边。
    * - **平板 / 大屏形态**：封顶到 `DETAIL_DOCK_TABLET_WIDTH`(592 = 现有基础 296 宽一倍，
    *   2026-09-14 用户要求「底栏在现有基础宽一倍，跳转框跟着拉伸」)，防「屏宽 − 64」在
    *   1024 下拉成 960vp 通栏，同时比 296 观感更舒展。
@@ -2191,10 +2369,11 @@ struct ThreadDetail {
    * 宽度变化后如仍偏差只调该值）。
    */
   private dockPillWidth(): number {
-    const w: number = this.currentWidth > 0 ? this.currentWidth - 64 : 296;
     if (!this.isWideFormDevice) {
-      return w > 240 ? w : 240;
+      const width: number = this.currentWidth > 0 ? this.currentWidth : 360;
+      return Math.max(240, width - 2 * FLOATING_DOCK_PHONE_INSET);
     }
+    const w: number = this.currentWidth > 0 ? this.currentWidth - 28 : 332;
     // 大折叠（docs/TiebaPura大折叠适配.md §5，2026-09-15 用户拍板）：底栏与「跳转到贴吧官方」
     // 弹窗同宽（dialogCardWidth 口径，400 封顶），横竖屏同值；平板维持 592 档；
     // SortPillShell 定位公式与 ReplyControls 宽度均经本单点，自动跟随。
@@ -2213,10 +2392,10 @@ struct ThreadDetail {
   /**
    * 官方悬浮岛总高（vp）：仅包裹评论条；排序切换行已移出为独立悬浮胶囊层。
    * 大折叠（2026-09-15 用户反馈横竖屏均「岛内部偏高、图标文字上下留空偏多」）收一档 66 → 62，
-   * CommentBar 岛内 height/padding 联动收 4（内容区不变、整体更紧凑）；平板 / 手机维持 66。
+   * 手机档与主界面的悬浮胶囊等高。
    */
   private dockPillHeight(): number {
-    return isLargeFoldDevice() ? 62 : 66;
+    return this.isWideFormDevice ? (isLargeFoldDevice() ? 62 : 66) : FLOATING_DOCK_PHONE_HEIGHT;
   }
 
   // ===== 「帖子沉浸式阅读」交互（2026-09-18，设置 → 个性化 / AppStorage `immersiveReading`）=====
@@ -2259,7 +2438,7 @@ struct ThreadDetail {
       } catch (e) {
       }
     }
-    if (!this.immersiveReading) {
+    if (!this.floatingPageBars || !this.immersiveReading) {
       return;
     }
     // 绝对位置取 Scroller 真值（onScroll 入参语义在工具链间有差异，不作累计位置依赖）
@@ -2384,7 +2563,6 @@ struct ThreadDetail {
     // 尾部提示延时器同理：预取在途时退页，1.2s 后的浮出回调不能落到已销毁的组件上
     this.clearLoadingHintTimer();
     // §Z4a 延后补齐调度器同理：延后/重试窗口内退页，回调不能再落到已销毁的组件上
-    this.clearEnrichTimer();
     // 分区上屏延时器：句柄已存但此前未入清理（退页后 50ms 回调写 floorsReady）
     if (this.floorsRevealTimer !== -1) {
       clearTimeout(this.floorsRevealTimer);
@@ -2426,11 +2604,10 @@ struct ThreadDetail {
    *   +12 为字重切换（Medium/Regular）与字体度量的余量 —— 宁宽不挤：壳偏宽只多几 vp 死区，
    *   偏窄会让 Tabs 压缩/裁掉胶囊文字。
    * 结果：标准字号 148、极大字号(1.35) 172，仍远小于全宽，该行两侧余下大片可滑动区。
+   * 官方样式（2026-11-10）：只看楼主胶囊上移回复区顶部标签页，壳只剩一枚胶囊 ——
+   *   28 = 单枚胶囊左右 padding 2×14；2 × fs(12) = 正序/倒序两字宽；+12 余量同前。
+   * 结果：标准字号 64、极大字号(1.35) 67，死区进一步收窄。
    */
-  private sortPillShellWidth(): number {
-    return 64 + 6 * fs(12, this.fontScale) + 12;
-  }
-
   /** API26+ 悬浮玻璃路径：真实 Tabs 单内容承载页叠层，底部 Dock 放入 .tabBar() 槽位
    *  （引擎认可 tabBar 槽位属于 TabBar 生效范围，悬浮条本体挂官方材质） */
   @Builder
@@ -2448,10 +2625,8 @@ struct ThreadDetail {
     .barOverlap(true)
     .barHeight(this.dockPillHeight())
     .barBackgroundColor(Color.Transparent)
-    // 去掉底栏默认模糊背板：barBackgroundBlurStyle 默认值是 BlurStyle.COMPONENT_REGULAR，
-    // 不关它会在悬浮岛后方渲染一条全宽磨砂带，上边缘看起来像一条细光感线（坑 26 同源）。
-    // 悬浮岛的玻璃由 barFloatingStyle.systemMaterial 承担，与该属性无关，关掉不影响官方材质。
-    .barBackgroundBlurStyle(BlurStyle.NONE)
+    .barBackgroundBlurStyle(this.bottomBarBackdrop && !this.immersiveGlassHidden
+      ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE)
     // 沉浸阅读（DT-M 杠杆① / DT-N 玻璃侧状态位）：隐藏态把胶囊宽度收 0 ⇒ 零面积 ⇒ 系统玻璃无从渲染；
     // barWidth 与 barBottomMargin 同层同源，响应式生效已由既有 dockNudge 机制验证。
     // ⚠️ 已知遗留（根因未解）：系统侧胶囊有最小宽地板（A1 实测宽 56），隐藏态会残留一枚小胶囊（文档 §4.9「遗留」）。
@@ -2463,6 +2638,9 @@ struct ThreadDetail {
       },
       // 首帧重排触发（2026-09-13）：见 dockNudge 声明处的说明，0.5vp 微变触发系统重排悬浮条。
       barBottomMargin: this.dockBottomMargin() + this.dockNudge * 0.5,
+      maskColor: this.bottomBarBackdrop && !this.immersiveGlassHidden
+        ? (this.isDark ? '#99000000' : '#CCF1F3F5') : Color.Transparent,
+      maskHeight: this.bottomBarBackdrop && !this.immersiveGlassHidden ? this.dockPillHeight() + this.dockBottomMargin() + 16 : 0,
       // 沉浸阅读隐藏态（DT-P / 实验 L1，2026-09-19）：换官方「空材质」⇒ 悬浮条的材质层不再渲染。
       // 与 P-B 的「撤材质（不传 / 传 undefined）」是两条路 —— 后者是「不设置」，系统回落自己的
       // 默认材质（真机实测 = 一层白背板）；本档是显式「关材质」，官方语义即「无材质效果」。
@@ -2504,320 +2682,90 @@ struct ThreadDetail {
     .animation(this.immersiveAnim())
   }
 
-  /** 排序切换胶囊独立悬浮层（官方壳路径）：正序/只看全部两枚钮不进入悬浮岛，
-   *  各自完整玻璃胶囊悬浮于评论岛上方，几何复刻旧 Dock：钮底距岛顶 8vp。
-   *  外层 Column 底部 margin = 岛底余量(30) + 岛高(66)，使钮底恰好悬于岛顶上方 8vp。 */
   @Builder
-  SortRowOverlay() {
-    Column() {
-      this.ReplyControls()
-    }
-    .width('100%')
-    .margin({ bottom: this.dockBottomMargin() + this.dockPillHeight() })
-    // 沉浸阅读（2026-09-18）：兜底路径排序行走同一套下沉显隐
-    .translate({ y: this.immersiveHidden ? this.immersiveBottomSink() : 0 })
-    .opacity(this.immersiveHidden ? 0 : 1)
-    .enabled(!this.immersiveHidden)
-    .animation(this.immersiveAnim())
-  }
-
-  /**
-   * 排序胶囊官方槽位壳（官方壳路径专用）：搭一个「只有 tabBar 的真实 Tabs」把排序行送进官方槽位。
-   * 依据：官方 A 档「按钮与选择类」只有 Slider / Toggle / Select，Button / Chip / SegmentButton 全属 B 档，
-   * 仅在 Navigation 标题栏与 Tabs(barPosition: End) 底部 TabBar 内生效（官方文档 §4.1/§4.2）；
-   * 而这两枚胶囊悬浮在页面中部，原写法必判 Material inactive: out of scope。
-   * 关键三点：
-   * ① TabContent 留空（内容区高度 = 壳高 46 - barHeight 46 = 0），壳里实际只有 tabBar 一行；
-   * ② 不传 .barFloatingStyle(...) —— 官方悬浮背板整体不生成，不会凭空多出一条玻璃底
-   *    （Index.ets 收藏编辑态已验证「不传 floating style 即彻底移除官方背板」）；
-   * ③ **壳宽收窄成「两枚胶囊这一列」**（A 方案，宽度见 sortPillShellWidth）：页签节点的命中区
-   *    恒等于壳矩形，壳开全宽时该节点横跨整行、空区照样吞掉竖向滑动（该节点是系统内部节点，
-   *    hitTestBehavior 挂不到它身上，B 方案已在 ThreadList 实测无效）；收窄后死区与两枚胶囊重合，
-   *    该行两侧恢复可滑动。
-   * 几何：壳高 = barHeight = 46；底距 = 岛底余量(30) + 岛高(66) —— 与改造前 SortRowOverlay 的
-   * margin-bottom 逐项相同；壳宽收窄后由外层全宽 Row 用 padding-left 32 钉回改造前的左缘，
-   * 故两枚胶囊的位置/大小/间距一行未改，只是玻璃来源换成官方材质、壳不再横跨整行。
-   */
-  @Builder
-  SortPillShell() {
-    // 水平定位（2026-09-13）：公式定位 + 横屏实测左移修正 ——
-    // 基准 = (currentWidth − 底栏宽) / 2（底栏由系统居中，壳左缘对齐底栏左缘）；
-    // 手机档 (393 − 329) / 2 = 32 逐像素不变。
-    // 横屏分栏（splitMode）下真机实测排序壳偏右（官方岛视觉左缘与公式值存在系统级偏差）；
-    // 修正量经真机二轮校准：28（偏左）→ 38（更偏左）→ 定 16（28 偏左说明左移过量，回撤 12）。
-    // 真机微调项：偏差变化时只调这一个值；竖屏 / 手机不修正。
-    // Row 与壳都挂 hitTestBehavior(None)：自身不参与触摸测试，子节点（两枚胶囊）与兄弟节点照常
-    // （与 ThreadList FabSlotShell 的同名处理一致）。
-    Row() {
-      Tabs({ barPosition: BarPosition.End }) {
-        TabContent()
-          .tabBar(this.SortRowInSlot())
+  DetailTopBar(inSlot: boolean) {
+    Row({ space: 3 }) {
+      this.DetailTopAction($r('sys.symbol.chevron_left'), '返回', 'thread_nav_back', inSlot, () => { this.goBack(); })
+      Button() {
+        Row({ space: 5 }) {
+          if ((this.detail?.forumAvatar ?? '').length > 0) {
+            Image(this.detail!.forumAvatar!)
+              .width(20)
+              .height(20)
+              .objectFit(ImageFit.Cover)
+              .borderRadius(5)
+          }
+          Text(this.forumName.length > 0 ? this.forumName + '吧' : '贴吧')
+            .fontSize(fs(13, this.fontScale))
+            .fontColor($r('sys.color.font_primary'))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          SymbolGlyph($r('sys.symbol.chevron_right'))
+            .fontSize(12)
+            .fontColor([$r('sys.color.icon_secondary')])
+        }
       }
-      .width(this.sortPillShellWidth())
-      .height(THREAD_DETAIL_SORT_ROW_HEIGHT)
-      .vertical(false)
-      .scrollable(false)
-      // 不挂 barOverlap：官方说明 barOverlap(true) 会把底栏默认模糊触发为 BlurStyle.COMPONENT_THICK，
-      // 残留的模糊背板/阴影会投在胶囊下方（真机可见一条全宽渐变带 + 细线）；本壳 TabContent 为空、
-      // 内容区高度恒 0，barOverlap 无任何布局作用，纯负资产。底栏岛壳 ImmersiveDockShell 内容要延伸
-      // 到悬浮岛之下才需要 barOverlap，且有 barFloatingStyle 重构整条 bar，故不受影响。
-      .barHeight(THREAD_DETAIL_SORT_ROW_HEIGHT)
-      .barBackgroundColor(Color.Transparent)
-      // 去掉底栏默认模糊背板：barBackgroundBlurStyle 默认值是 BlurStyle.COMPONENT_REGULAR，
-      // 不显式关掉时即使 barBackgroundColor 透明，槽内仍会渲染一条磨砂板遮挡内容。
-      .barBackgroundBlurStyle(BlurStyle.NONE)
-      .backgroundColor(Color.Transparent)
-      .clip(false)
-      .hitTestBehavior(HitTestMode.None)
-    }
-    .width('100%')
-    .height(THREAD_DETAIL_SORT_ROW_HEIGHT)
-    .justifyContent(FlexAlign.Start)
-    // 水平定位（2026-09-13）：基准 = (currentWidth − 底栏宽) / 2（底栏居中、壳左缘对齐底栏左缘）；
-    // 横屏分栏真机微调：底栏加宽到 592 后实测胶囊仍偏右 → 左移量 16 → 28 → 40（2026-09-14 两轮校准，偏差变化时只调这一个值）；
-    // 竖屏 / 手机维持公式（手机 (393 − 329) / 2 = 32 逐像素不变）。
-    .padding({
-      // 大折叠（2026-09-15 真机反馈）：不套用 −40 平板分栏修正——那是平板 592 底栏的系统偏差校准值，
-      // 大折叠底栏 400（dialogCardWidth 口径），纯公式定位已对齐底栏左缘，再减 40 会把排序壳推出底栏外。
-      // 阔直屏（2026-09-17 用户云调试反馈横屏排序钮偏左 + 离底栏远）同理排除：纯公式即与底栏左缘对齐
-      left: Math.max(0, (this.currentWidth - this.dockPillWidth()) / 2
-        - (this.splitMode() && !isLargeFoldDevice() && !isPuraXMaxDevice() && !isWideBarDevice() ? 40 : 0))
-    })
-    .hitTestBehavior(HitTestMode.None)
-    // 底距沿用原壳上的 margin（岛底余量 30 + 岛高 66），margin 已移交外层 Row，壳自身不再设；
-    // 横屏分栏追加 14vp 呼吸（真机反馈横屏下排序行与底栏贴住）——大折叠不套用（2026-09-15
-    // 真机反馈大折叠横屏排序胶囊离底栏太远，其底栏 400 较矮，与竖屏同距即可）；阔直屏同理不套用
-    // （2026-09-17 用户反馈横屏排序钮离底栏远，回落与竖屏同距）
-    .margin({ bottom: this.dockBottomMargin() + this.dockPillHeight()
-      + (this.splitMode() && !isLargeFoldDevice() && !isPuraXMaxDevice() && !isWideBarDevice() ? 14 : 0) })
-    // 沉浸阅读（2026-09-18 三轮；2026-09-19 回退 P-B′ 后不变）：约 0.6 倍高下沉 + 淡出。
-    // 本行是应用节点（排序壳兜底叠加层），与底栏岛内容层同帧起步；玻璃侧错帧不改本行。
-    .translate({ y: this.immersiveHidden ? this.immersiveBottomSink() : 0 })
-    .opacity(this.immersiveHidden ? 0 : 1)
-    .enabled(!this.immersiveHidden)
-    .animation(this.immersiveAnim())
-  }
-
-  /** 排序行（官方槽位版）：外层 Column 撑满壳宽，内层 Row 塞满 Column，几何与 SortRowOverlay 内
-   *  ReplyControls 逐项一致（space 8、padding top4/bottom8、两钮靠左排列）。
-   *  行宽跟随壳宽（'100%'）而非写死「屏宽 - 64vp」：A 方案把壳宽收窄成两枚胶囊这一列后，
-   *  若行仍按屏宽算宽度会溢出壳，且 100% 的参照物已从「屏宽」变成「壳宽」，必须同步改。
-   *  左缘 32 由 SortPillShell 外层 Row 的 padding-left 承担，本行不再负责定位。 */
-  @Builder
-  SortRowInSlot() {
-    Column() {
-      Row({ space: 8 }) {
-        this.SortPillInSlot(this.sortType === 0 ? '正序' : '倒序', this.sortType === 0, (): void => {
-          this.sortType = this.sortType === 0 ? 1 : 0;
-          this.loadDetail();
-        })
-        this.SortPillInSlot(this.seeLz ? '只看楼主' : '只看全部', this.seeLz, (): void => {
-          this.seeLz = !this.seeLz;
-          this.loadDetail();
-        })
-      }
-      .width('100%')
-      .padding({ top: 4, bottom: 8 })
-      .justifyContent(FlexAlign.Start)
-    }
-    .width('100%')
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
-  }
-
-  /**
-   * 排序胶囊（官方槽位版）：几何与旧 SortPill 逐项一致（高 34 / 左右 padding 14 / 字号 12 /
-   * Radius.full / 选中与未选中两态），只把玻璃换成官方沉浸材质，并按官方口径删掉
-   * backgroundColor / border / backgroundBlurStyle / shadow 四项（材质自带底、描边与阴影，不要与材质叠用）：
-   * - Button 必须显式 backgroundColor(Color.Transparent)：Button 自带品牌蓝默认填充，不清底会透出蓝底；
-   * - seg(false) 为 THIN 中性档、seg(true) 为 REGULAR 档，与顶栏 DetailTitleBar 同款（上下两端观感统一）。
-   */
-  @Builder
-  SortPillInSlot(label: string, active: boolean, onTap: () => void) {
-    Button(label)
-      .fontSize(fs(12, this.fontScale))
-      .fontColor(active ? Theme.segActiveText(this.isDark) : $r('sys.color.font_secondary'))
-      .fontWeight(active ? FontWeight.Medium : FontWeight.Regular)
-      .backgroundColor(Color.Transparent)
-      // 无阴影档：两枚胶囊浮在白卡上方，材质自带阴影落在卡面合并成一层淡阴影（真机反馈要求去除）；
-      // 顶栏 DetailTitleBar 胶囊仍用 seg（带阴影）。
-      .systemMaterial(ImmMaterial.segFlat(active))
-      .borderRadius(Radius.full)
       .height(34)
-      .padding({ left: 14, right: 14 })
-      .onClick(onTap)
-  }
+      .constraintSize({ maxWidth: '46%' })
+      .padding({ left: 8, right: 7 })
+      .borderRadius(Radius.full)
+      .backgroundColor(inSlot ? Color.Transparent : Theme.bg(this.isDark))
+      .systemMaterial(inSlot ? ImmMaterial.seg(false) : ImmMaterial.empty())
+      .id('thread_nav_forum')
+      .accessibilityText('进入贴吧主页')
+      .onClick(() => { this.openForumHome(); })
 
-  /**
-   * 顶部满宽渐显带（丢帧治理 P2 2026-09-26：原 DST_IN 遮罩要求内容层整体 blendMode(OFFSCREEN)，
-   * 滚动时每帧全屏离屏合成 + 回读，大屏旗舰 120Hz 下 GPU 填充率瓶颈；改为「页面底色 → 透明」
-   * 渐变条直接盖在内容上，视觉近似（内容被底色渐隐 ≈ alpha 渐显）且零离屏。
-   * 高度固定 = 吧名胶囊下沿（TOP_FADE_BAND_HEIGHT = 44 状态栏让位 + 44 胶囊高），
-   * 带外内容不受影响、不参与命中测试。因为只挂在楼层内容层上，悬浮顶栏（返回/分享/吧名胶囊）保持全实。
-   * 回退 = 恢复 linearGradient colors 两档 alpha 形态 + .blendMode(DST_IN, OFFSCREEN)，
-   * 以及两处内容容器的 .blendMode(SRC_OVER, OFFSCREEN)。
-   */
-  @Builder
-  TopFadeBand() {
-    Stack()
-      .width('100%')
-      .height(TOP_FADE_BAND_HEIGHT)
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [
-          [Theme.bg(this.isDark), 0.0],
-          [this.isDark ? '#00101114' : '#00F2F4F7', 1.0]
-        ]
+      Blank()
+      this.DetailTopAction($r('sys.symbol.magnifyingglass'), '搜索', 'thread_nav_search', inSlot, () => {
+        this.getUIContext().getRouter().pushUrl({ url: 'pages/Search' });
       })
-      .hitTestBehavior(HitTestMode.None)
-  }
-
-  /**
-   * 官方槽位标题栏：整行搬进 Navigation 的 title 槽位。
-   * 几何与旧悬浮顶栏逐项一致（外层 high 98 / padding top 44 + bottom 10 + 左右 Spacing.lg、Row high 44、
-   * 吧名胶囊 58% 宽 + 左右 padding 16 + 居中），只把玻璃从 segGlass + backgroundBlurStyle 自绘换成官方沉浸材质：
-   * - 返回钮 / 分享钮 / 吧名胶囊 → ImmMaterial.seg(false)（THIN 中性档，与首页、进吧顶栏同一套材质语言）；
-   * - 三处都是 Button，必须显式 backgroundColor(Color.Transparent)：Button 自带品牌蓝默认填充，不清底会透出蓝底；
-   * - 不挂 border / backgroundBlurStyle / shadow：官方明确不建议与 systemMaterial 同用（会互相覆盖）；
-   * - 旧外壳 Stack 的「透明 border / shadow 清底」与 zIndex(10) 一并去掉（槽内不再需要叠层序）。
-   * 图标/文字色沿用系统可反色资源（icon_primary / font_primary），满足官方自动反色前提。
-   */
-  @Builder
-  DetailTitleBar() {
-    Stack() {
-      Row() {
-        Button() {
-          SymbolGlyph($r('sys.symbol.chevron_left')).fontColor([$r('sys.color.icon_primary')]).fontSize(fs(24, this.fontScale))
+      this.DetailTopAction($r('sys.symbol.share'), '分享帖子', 'thread_nav_share', inSlot, () => {
+        this.shareThread(this.buildSharePayload());
+      })
+      Button({ type: ButtonType.Circle }) {
+        Row({ space: 3 }) {
+          ForEach([0, 1, 2], () => {
+            Column().width(3).height(3).borderRadius(1.5).backgroundColor($r('sys.color.icon_primary'))
+          }, (index: number) => String(index))
         }
-        .width(44)
-        .height(44)
-        .backgroundColor(Color.Transparent)
-        .systemMaterial(ImmMaterial.seg(false))
-        .borderRadius(Radius.full)
-        .onClick(() => { this.goBack(); })
-        Blank()
-        // 分享按钮（右上角）：与返回钮同档玻璃，点按分享当前帖子
-        //（与首页 ThreadCard 分享同机制：Share Kit 系统分享面板，失败兜底剪贴板）
-        Button() {
-          SymbolGlyph($r('sys.symbol.share')).fontColor([$r('sys.color.icon_primary')]).fontSize(fs(24, this.fontScale))
-        }
-        .width(44)
-        .height(44)
-        .backgroundColor(Color.Transparent)
-        .systemMaterial(ImmMaterial.seg(false))
-        .borderRadius(Radius.full)
-        .accessibilityText('分享帖子')
-        .onClick(() => { this.shareThread(this.buildSharePayload()); })
       }
-      .width('100%')
-      .height(44)
-      .align(Alignment.Start)
-      Button() {
-        Text(this.detail ? `${this.detail.forumName || this.forumName || '贴吧'}吧` : `${this.forumName || '贴吧'}吧`)
-          .fontSize(fs(16, this.fontScale))
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('sys.color.font_primary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: '85%' })
-      }
-      .backgroundColor(Color.Transparent)
-      .systemMaterial(ImmMaterial.seg(false))
-      .borderRadius(Radius.full)
-      .height(44)
-      .width('58%')
-      .padding({ left: 16, right: 16 })
-      .align(Alignment.Center)
-      .accessibilityText('进入贴吧主页')
-      .onClick(() => { this.openForumHome(); })
+      .width(38)
+      .height(38)
+      .padding(0)
+      .backgroundColor(this.floatingPageBars && !inSlot ? Theme.segGlass(this.isDark, false) : Color.Transparent)
+      .backgroundBlurStyle(this.floatingPageBars && !inSlot ? BlurStyle.Thin : BlurStyle.NONE)
+      .systemMaterial(inSlot ? ImmMaterial.seg(false) : ImmMaterial.empty())
+      .id('thread_nav_more')
+      .accessibilityText('更多操作')
+      .bindMenu([
+        { value: '复制帖子链接', action: () => { this.copyJumpLink(this.threadWebUrl()); } },
+        { value: '在官方贴吧打开', action: () => { this.openJumpDialog(); } }
+      ])
     }
     .width('100%')
-    .height(98)
-    .padding({ left: Spacing.lg, right: Spacing.lg, top: 44, bottom: 10 })
-    .backgroundColor(Color.Transparent)
-    // 沉浸阅读（2026-09-18 三轮）：整行上移约 0.6 倍高（−59）+ 淡出，藏起 180ms EaseIn / 唤出 260ms 轻回弹。
-    // 槽位高度固定 98 不参与内容布局（Scroll 首项自带 98 占位），故位移不影响正文排布。
-    .translate({ y: this.immersiveHidden ? this.immersiveTopSink() : 0 })
-    // 一镜到底（2026-09-27 v2）：顶栏绘制在页面内容层之上，飞行层盖不住它——
-    // 透明度与飞行层黑幕浓度反向联动（黑幕起 → 顶栏同步隐，黑幕落 → 顶栏同步现），
-    // 消除「morph 期间顶栏浮在黑幕上、模态挂载瞬间顶栏被盖掉」的闪变。
-    .opacity(this.immersiveHidden ? 0 : 1 - this.morphBgOpacity)
-    // opacity 0 的组件仍参与命中测试，必须显式禁用，避免"看不见但能点到返回/分享"
-    .enabled(!this.immersiveHidden && this.morphBgOpacity < 0.5)
+    .height(this.floatingPageBars ? THREAD_DETAIL_TITLE_BAR_HEIGHT : THREAD_DETAIL_FIXED_BAR_HEIGHT)
+    .padding({ left: 10, right: 10, top: this.floatingPageBars ? 44 : 0, bottom: this.floatingPageBars ? 10 : 0 })
+    .backgroundColor(this.floatingPageBars ? Color.Transparent : Theme.bgCard(this.isDark))
+    .translate({ y: this.floatingPageBars && this.immersiveHidden ? this.immersiveTopSink() : 0 })
+    .opacity(this.floatingPageBars && this.immersiveHidden ? 0 : 1 - this.morphBgOpacity)
+    .enabled(!(this.floatingPageBars && this.immersiveHidden) && this.morphBgOpacity < 0.5)
     .animation(this.immersiveAnim())
   }
 
-  /**
-   * 兜底路径顶栏（改造前原样）：页面主体悬浮层（内容可穿过）+ segGlass 极淡底 + backgroundBlurStyle 真模糊磨砂。
-   * 仅在官方 title 槽位不可用时挂载（见 ContentLayer 的条件挂载）。
-   */
   @Builder
-  LegacyTopBar() {
-    Stack() {
-      Row() {
-        Button() {
-          SymbolGlyph($r('sys.symbol.chevron_left')).fontColor([$r('sys.color.icon_primary')]).fontSize(fs(24, this.fontScale))
-        }
-        .width(44)
-        .height(44)
-        .backgroundColor(Theme.segGlass(this.isDark, false))
-        .border({ width: 0.5, color: Theme.manualGlassBorder() })
-        .backgroundBlurStyle(BlurStyle.Thin, { scale: 0.85 })
-        .shadow(Theme.segGlassShadow(this.isDark, false))
-        .borderRadius(Radius.full)
-        .onClick(() => { this.goBack(); })
-        Blank()
-        // 分享按钮（右上角）：UI 与返回按钮一致（44 圆钮 + segGlass 极淡底 + backgroundBlurStyle 真模糊磨砂），
-        // 点按分享当前帖子（与首页 ThreadCard 分享同机制：Share Kit 系统分享面板，失败兜底剪贴板）
-        Button() {
-          SymbolGlyph($r('sys.symbol.share')).fontColor([$r('sys.color.icon_primary')]).fontSize(fs(24, this.fontScale))
-        }
-        .width(44)
-        .height(44)
-        .backgroundColor(Theme.segGlass(this.isDark, false))
-        .border({ width: 0.5, color: Theme.manualGlassBorder() })
-        .backgroundBlurStyle(BlurStyle.Thin, { scale: 0.85 })
-        .shadow(Theme.segGlassShadow(this.isDark, false))
-        .borderRadius(Radius.full)
-        .accessibilityText('分享帖子')
-        .onClick(() => { this.shareThread(this.buildSharePayload()); })
-      }
-      .width('100%')
-      .height(44)
-      .align(Alignment.Start)
-      Button() {
-        Text(this.detail ? `${this.detail.forumName || this.forumName || '贴吧'}吧` : `${this.forumName || '贴吧'}吧`)
-          .fontSize(fs(16, this.fontScale))
-          .fontWeight(FontWeight.Medium)
-          .fontColor($r('sys.color.font_primary'))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: '85%' })
-      }
-      .backgroundColor(Theme.segGlass(this.isDark, false))
-      .border({ width: 0.5, color: Theme.manualGlassBorder() })
-      .backgroundBlurStyle(BlurStyle.Thin, { scale: 0.85 })
-      .shadow(Theme.segGlassShadow(this.isDark, false))
-      .borderRadius(Radius.full)
-      .height(44)
-      .width('58%')
-      .padding({ left: 16, right: 16 })
-      .align(Alignment.Center)
-      .accessibilityText('进入贴吧主页')
-      .onClick(() => { this.openForumHome(); })
+  DetailTopAction(icon: Resource, label: string, nodeId: string, inSlot: boolean, onTap: () => void) {
+    Button({ type: ButtonType.Circle }) {
+      SymbolGlyph(icon).fontSize(21).fontColor([$r('sys.color.icon_primary')])
     }
-    .width('100%')
-    .height(98)
-    .padding({ left: Spacing.lg, right: Spacing.lg, top: 44, bottom: 10 })
-    .backgroundColor(Color.Transparent)
-    .border({ width: 0, color: Color.Transparent })
-    .shadow({ radius: 0, color: Color.Transparent, offsetY: 0 })
-    .zIndex(10)
-    // 沉浸阅读（2026-09-18 三轮）：与官方槽位路径 DetailTitleBar 同款（0.6 倍上移 + 淡出 + 禁用命中）
-    .translate({ y: this.immersiveHidden ? this.immersiveTopSink() : 0 })
-    .opacity(this.immersiveHidden ? 0 : 1)
-    .enabled(!this.immersiveHidden)
-    .animation(this.immersiveAnim())
+    .width(38)
+    .height(38)
+    .padding(0)
+    .backgroundColor(this.floatingPageBars && !inSlot ? Theme.segGlass(this.isDark, false) : Color.Transparent)
+    .backgroundBlurStyle(this.floatingPageBars && !inSlot ? BlurStyle.Thin : BlurStyle.NONE)
+    .systemMaterial(inSlot ? ImmMaterial.seg(false) : ImmMaterial.empty())
+    .id(nodeId)
+    .accessibilityText(label)
+    .onClick(onTap)
   }
 
   /** 内容层（主楼/楼层 Scroll 全量渲染 + 骨架屏/错误态 + 悬浮顶栏），借壳与兜底分支共用 */
@@ -2835,7 +2783,9 @@ struct ThreadDetail {
             // 沉浸四项（overlay / blendMode / backgroundColor / opacity）必须**整体**挂在这一层：
             // 只挂右栏会让顶部渐隐只盖右栏、blendMode 作用域错位（DT-E 红线）。
             Column() {
-              Column().width('100%').height(98)
+              if (this.floatingPageBars) {
+                Column().width('100%').height(THREAD_DETAIL_TITLE_BAR_HEIGHT)
+              }
               Row({ space: Spacing.md }) {
                 // 左栏：主楼（独立滚动；不挂 onReachEnd / id —— 主楼不参与分页与楼层定位）
                 // 首项放「幽灵表头占位」（2026-09-13）：右栏第一排卡片上方有「回复 N 条」表头 +
@@ -2853,9 +2803,9 @@ struct ThreadDetail {
                 }
                 .width(this.splitMainWidth())
                 .scrollBar(BarState.Off)
-                .clip(false)
+                .clip(!this.floatingPageBars)
                 .edgeEffect(EdgeEffect.Spring)
-                .padding({ left: Spacing.lg, right: 8, bottom: 160 })
+                .padding({ left: Spacing.lg, right: 8, bottom: this.floatingPageBars ? this.dockPillHeight() + this.dockBottomMargin() + 12 : 8 })
 
                 // 右栏：回复区（保留 id / onReachEnd / 底部让位 → 楼层定位与分页公式零改动）
                 // 弃用 WaterFlow + sections（错位修复二，同竖屏分支）：回归 Scroll + 列内独立堆叠
@@ -2868,6 +2818,7 @@ struct ThreadDetail {
                         this.FooterSentinel()
                       }
                       .width('100%')
+                      .id('reply_section_anchor')
                       .opacity(this.floorsOpacity)
                       .renderGroup(this.floorsRevealing)
                     }
@@ -2882,31 +2833,22 @@ struct ThreadDetail {
                 }
                 .layoutWeight(1)
                 .width('100%')
-                .padding({ left: 8, right: Spacing.lg, bottom: 160 })
+                .padding({ left: 8, right: Spacing.lg, bottom: this.floatingPageBars ? this.dockPillHeight() + this.dockBottomMargin() + 12 : 8 })
                 .id('thread_scroll_content')
                 .scrollBar(BarState.Off)
-                .clip(false)
+                .clip(!this.floatingPageBars)
                 .edgeEffect(EdgeEffect.Spring)
                 // 无感翻页：视口高采集
                 .onAreaChange((_oldValue: Area, newValue: Area) => {
                   this.detailViewportH = newValue.height as number;
                 })
-                .onReachEnd(() => {
-                  // 沉浸阅读：触底即复位（用户到这里多半要用评论栏）
-                  this.resetImmersive();
-                  // 无感翻页：已到边界，后台预取若仍在途则立即浮出提示（不再静默）
-                  this.revealLoadHintOnReachEnd();
-                  if (!this.loadingMore && this.hasMoreFloors) {
-                    this.loadMoreFloors();
-                  }
-                })
+                .onReachEnd(() => { this.onFloorScrollEnd(); })
                 // 沉浸阅读（2026-09-18）：方向阈值驱动顶栏 / 底栏显隐（左栏主楼不挂，见 onDetailScroll 注释）
                 // 无感翻页（2026-09-19）：同一挂点串联滚动预取（.onScroll 只能挂一个，不能另起挂点）
                 // P4（2026-09-26）：同一挂点再串联楼层渐进挂载推进
                 .onScroll((xOffset: number, yOffset: number) => {
                   this.onDetailScroll(xOffset, yOffset);
                   this.onDetailScrollPrefetch();
-                  this.maybeMountMoreFloors(yOffset);
                 })
               }
               .width('100%')
@@ -2915,9 +2857,12 @@ struct ThreadDetail {
             }
             .width('100%')
             .height('100%')
-            .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-            .overlay(this.TopFadeBand(), { align: Alignment.Top })
-            .backgroundColor(Theme.bg(this.isDark))
+            .expandSafeArea(this.floatingPageBars ? [SafeAreaType.SYSTEM] : [],
+              this.floatingPageBars ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [])
+            .linearGradientBlur(this.floatingPageBars ? TopBarFx.blur(this.tbxTick) : 0, { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+            .overlay(() => { if (this.floatingPageBars) { TopGlassVeil() } })
+            // 官方样式（2026-11-10）：单列白底平铺（官方详情页通体白）；多列瀑布流保留灰底白卡对比
+            .backgroundColor(this.replyColumns() > 1 ? Theme.bg(this.isDark) : Theme.bgCard(this.isDark))
             .opacity(this.contentOpacity)
             .translate({ y: this.contentTranslateY })
           } else {
@@ -2929,7 +2874,9 @@ struct ThreadDetail {
           Scroll(this.scroller) {
             Column({ space: Spacing.md }) {
               // 预留顶栏高度作为初始间距
-              Column().width('100%').height(98)
+              if (this.floatingPageBars) {
+                Column().width('100%').height(THREAD_DETAIL_TITLE_BAR_HEIGHT)
+              }
               // 主楼通栏满宽（2026-09-17 二次拍板：等宽仅横屏分栏生效，竖屏不用）
               this.PostHeader()
               if (this.floorsReady) {
@@ -2939,6 +2886,7 @@ struct ThreadDetail {
                   this.FooterSentinel()
                 }
                 .width('100%')
+                .id('reply_section_anchor')
                 .opacity(this.floorsOpacity)
                 .renderGroup(this.floorsRevealing)
               }
@@ -2957,22 +2905,14 @@ struct ThreadDetail {
           .height('100%')
           .scrollBar(BarState.Off)
           // 为底部悬浮回复栏留出滚动空间，最后一项可完整滚入屏幕
-          .padding({ left: Spacing.lg, right: Spacing.lg, top: 0, bottom: 160 })
+          .padding({ left: this.replyColumns() > 1 ? Spacing.lg : 12, right: this.replyColumns() > 1 ? Spacing.lg : 12, top: 0, bottom: this.floatingPageBars ? this.dockPillHeight() + this.dockBottomMargin() + 12 : 8 })
           .edgeEffect(EdgeEffect.Spring)
           // 无感翻页：视口高采集
           .onAreaChange((_oldValue: Area, newValue: Area) => {
             this.detailViewportH = newValue.height as number;
           })
           // 滚动触底：自动加载下一页楼层（loadingMore/hasMore 双防重）
-          .onReachEnd(() => {
-            // 沉浸阅读：触底即复位（用户到这里多半要用评论栏）
-            this.resetImmersive();
-            // 无感翻页：已到边界，后台预取若仍在途则立即浮出提示（不再静默）
-            this.revealLoadHintOnReachEnd();
-            if (!this.loadingMore && this.hasMoreFloors) {
-              this.loadMoreFloors();
-            }
-          })
+          .onReachEnd(() => { this.onFloorScrollEnd(); })
           .id('thread_scroll_content')
           // 沉浸阅读（2026-09-18）：方向阈值驱动顶栏 / 底栏显隐
           // 无感翻页（2026-09-19）：同一挂点串联滚动预取（.onScroll 只能挂一个，不能另起挂点）
@@ -2980,14 +2920,16 @@ struct ThreadDetail {
           .onScroll((xOffset: number, yOffset: number) => {
             this.onDetailScroll(xOffset, yOffset);
             this.onDetailScrollPrefetch();
-            this.maybeMountMoreFloors(yOffset);
           })
           // 沉浸：绘制扩展到状态栏与底部安全区，滚动可视区 = 整屏，无独立裁剪层
-          .clip(false)
-          .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+          .clip(!this.floatingPageBars)
+          .expandSafeArea(this.floatingPageBars ? [SafeAreaType.SYSTEM] : [],
+              this.floatingPageBars ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [])
           // 顶部满宽渐显带：只挂在楼层内容层上（悬浮顶栏是同级兄弟节点，不受此遮罩影响，胶囊钮保持全实）
-          .overlay(this.TopFadeBand(), { align: Alignment.Top })
-          .backgroundColor(Theme.bg(this.isDark))
+          .linearGradientBlur(this.floatingPageBars ? TopBarFx.blur(this.tbxTick) : 0, { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+          .overlay(() => { if (this.floatingPageBars) { TopGlassVeil() } })
+          // 官方样式（2026-11-10）：单列白底平铺（官方详情页通体白）；多列瀑布流保留灰底白卡对比
+          .backgroundColor(this.replyColumns() > 1 ? Theme.bg(this.isDark) : Theme.bgCard(this.isDark))
           .opacity(this.contentOpacity)
           .translate({ y: this.contentTranslateY })
           }
@@ -3004,8 +2946,8 @@ struct ThreadDetail {
         }
 
         // 悬浮顶栏（内容可穿过）；官方 title 槽位路径下三元素已在槽位里（DetailTitleBar），这里不再叠一层
-        if (!(THREAD_DETAIL_OFFICIAL_TITLE_BAR && this.materialSupported)) {
-          this.LegacyTopBar()
+        if (this.floatingPageBars && !(THREAD_DETAIL_OFFICIAL_TITLE_BAR && this.materialSupported)) {
+          this.DetailTopBar(false)
         }
     }
     .width('100%')
@@ -3014,69 +2956,17 @@ struct ThreadDetail {
     // 保证内容层透明，让底部沉浸悬浮栏背后的内容可透出。
   }
 
-  /** 底部悬浮栏（排序栏 + 评论栏）叠放：root Stack(Bottom) 内贴底悬浮，两栏分体、楼层内容可穿行其后 */
   @Builder
   BottomDock() {
     Column() {
-      if (this.loadState === LoadState.Success && this.detail) {
-        this.ReplyControls()
-      }
       this.CommentBar(false)
     }
     .width('100%')
     .align(Alignment.Bottom)
-    // 沉浸阅读（2026-09-18 三轮）：兜底底栏（排序行 + 评论条）约 0.6 倍高下沉 + 淡出（该路径无官方玻璃，无时序问题）
     .translate({ y: this.immersiveHidden ? this.immersiveBottomSink() : 0 })
     .opacity(this.immersiveHidden ? 0 : 1)
     .enabled(!this.immersiveHidden)
     .animation(this.immersiveAnim())
-  }
-
-  /** 排序切换行：正序 / 只看全部两枚独立玻璃小胶囊。旧叠放路径贴于评论条上方，
-   *  官方壳路径经 SortRowOverlay 悬浮于评论岛上方。
-   *  宽度与评论条同源（`dockPillWidth()`，手机基线 296）→ 排序行左缘 = 底栏左缘
-   *  （父 `BottomDock` 的 `align(Alignment.Bottom)` 水平居中，两行左缘天然对齐）。 */
-  @Builder
-  ReplyControls() {
-    Row({ space: 8 }) {
-      this.SortPill(this.sortType === 0 ? '正序' : '倒序', this.sortType === 0, (): void => {
-        this.sortType = this.sortType === 0 ? 1 : 0;
-        this.loadDetail();
-      })
-      this.SortPill(this.seeLz ? '只看楼主' : '只看全部', this.seeLz, (): void => {
-        this.seeLz = !this.seeLz;
-        this.loadDetail();
-      })
-    }
-    .width(this.dockPillWidth())
-    .padding({ top: 4, bottom: 8 })
-    .justifyContent(FlexAlign.Start)
-    .backgroundColor(Color.Transparent)
-    .zIndex(9)
-  }
-
-  /** 排序切换胶囊：正序/只看全部各自独立的真磨砂玻璃小胶囊。
-   *  不挂 systemMaterial：钮悬浮于楼层内容上方，属页面主体元素，官方材质槽位
-   *  （Navigation 标题栏 / Tabs 底部栏 / 弹窗）之外，systemMaterial 挂此不渲染
-   *  （Material inactive: out of scope，ThreadList 排序段同受此限）。
-   *  内容区玻璃唯一可靠途径 = backgroundBlurStyle 真磨砂 + segGlass 极淡底色
-   *  （亮色近透明，让楼层文字滑过钮后仍可透出）+ 白高光描边 + 浮起阴影。
-   *  两路径（官方壳悬浮层 / 旧叠放）均使用同一完整样式，不再随 materialSupported 简化 */
-  @Builder
-  SortPill(label: string, active: boolean, onTap: () => void) {
-    Button(label)
-      .fontSize(fs(12, this.fontScale))
-      .fontColor(active ? Theme.segActiveText(this.isDark) : $r('sys.color.font_secondary'))
-      .fontWeight(active ? FontWeight.Medium : FontWeight.Regular)
-      .backgroundColor(Theme.segGlass(this.isDark, active))
-      .border({ width: 0.5, color: Theme.manualGlassBorder() })
-      .backgroundBlurStyle(active ? BlurStyle.Regular : BlurStyle.Thin,
-        { scale: active ? 0.8 : 0.85 })
-      .shadow(Theme.segGlassShadow(this.isDark, active))
-      .borderRadius(Radius.full)
-      .height(34)
-      .padding({ left: 14, right: 14 })
-      .onClick(onTap)
   }
 
   // 点赞请求进行中标志：防止连点产生"点赞→立即取消"连环请求（贴吧对该模式限流，报 3280001）
@@ -3107,11 +2997,12 @@ struct ThreadDetail {
         forumAvatar: d.forumAvatar, title: d.title, forumName: d.forumName,
         author: d.author, authorAvatar: d.authorAvatar, authorId: d.authorId,
         content: d.content, contentText: d.contentText,
-        images: d.images, replyNum: d.replyNum,
+        images: d.images, fragments: d.fragments, replyNum: d.replyNum,
         likeCount: currentCount + (next ? 1 : -1),
         isLiked: next,
         isCollected: d.isCollected,
-        createTime: d.createTime, page: d.page, totalPage: d.totalPage,
+        createTime: d.createTime, page: d.page, totalPage: d.totalPage, shareCount: d.shareCount,
+        level: d.level,
       };
     }
     try {
@@ -3130,14 +3021,109 @@ struct ThreadDetail {
           forumAvatar: d.forumAvatar, title: d.title, forumName: d.forumName,
           author: d.author, authorAvatar: d.authorAvatar, authorId: d.authorId,
           content: d.content, contentText: d.contentText,
-          images: d.images, replyNum: d.replyNum,
+          images: d.images, fragments: d.fragments, replyNum: d.replyNum,
           likeCount: currentCount + (next ? -1 : 1),
           isLiked: previous,
           isCollected: d.isCollected,
-          createTime: d.createTime, page: d.page, totalPage: d.totalPage,
+          createTime: d.createTime, page: d.page, totalPage: d.totalPage, shareCount: d.shareCount,
+          level: d.level,
         };
       }
       this.getUIContext().getPromptAction().showToast({ message: '点赞失败，已恢复原状态' });
+    }
+  }
+
+  /**
+   * 官方样式·关注态懒加载（2026-11-10）：详情落地后拉一次作者 profile，
+   * 取 isFollowed（按钮初始态）与 portrait hash（followUser/unfollowUser 接口入参）。
+   * 每位作者只探测一次（followProbeAuthorId 闸门），翻页/刷新不重复请求。
+   */
+  private lazyProbeAuthorFollow(): void {
+    const authorId: string = `${this.detail?.authorId ?? ''}`.trim();
+    if (authorId.length === 0 || this.followProbeAuthorId === authorId) {
+      return;
+    }
+    this.followProbeAuthorId = authorId;
+    TiebaService.getInstance().fetchUserProfile(authorId).then((p: UserProfileModel): void => {
+      // 探测返回时作者可能已换（极快翻页），仅同作者才落状态
+      if (`${this.detail?.authorId ?? ''}`.trim() === authorId) {
+        this.authorFollowed = p.isFollowed;
+        this.authorPortrait = p.portrait;
+      }
+    }).catch((): void => {
+      // 探测失败静默：按钮回退「+ 关注」初始态，点击时再按需拉 portrait
+    });
+  }
+
+  /** 官方样式·关注/取关楼主：复用 UserProfile 页同款 followUser/unfollowUser 接口，乐观更新失败回滚 */
+  private async toggleFollowAuthor(): Promise<void> {
+    if (this.followBusy) {
+      return;
+    }
+    const authorId: string = `${this.detail?.authorId ?? ''}`.trim();
+    const author: string = this.detail?.author ?? '';
+    if (authorId.length === 0) {
+      this.getUIContext().getPromptAction().showToast({ message: '作者信息暂不可用' });
+      return;
+    }
+    this.followBusy = true;
+    const prev: boolean = this.authorFollowed;
+    this.authorFollowed = !prev;
+    try {
+      let portrait: string = this.authorPortrait;
+      if (!prev && portrait.length === 0) {
+        // 关注前缺 portrait：先拉 profile 再关注
+        const p: UserProfileModel = await TiebaService.getInstance().fetchUserProfile(authorId);
+        portrait = p.portrait;
+        this.authorPortrait = portrait;
+      }
+      const ok: boolean = prev
+        ? await TiebaService.getInstance().unfollowUser(portrait)
+        : await TiebaService.getInstance().followUser(portrait, author);
+      if (!ok) {
+        this.authorFollowed = prev;
+        this.getUIContext().getPromptAction().showToast({ message: prev ? '取消关注失败，请稍后重试' : '关注失败，请稍后重试' });
+        return;
+      }
+      Haptic.light();
+      this.getUIContext().getPromptAction().showToast({ message: prev ? '已取消关注' : '关注成功' });
+    } catch (e) {
+      this.authorFollowed = prev;
+      const errMsg: string = `${(e as BusinessError).message ?? ''}`;
+      this.getUIContext().getPromptAction().showToast({ message: errMsg.length > 0 ? errMsg : (prev ? '取消关注失败，请稍后重试' : '关注失败，请稍后重试') });
+    } finally {
+      this.followBusy = false;
+    }
+  }
+
+  /** 官方样式·互动数据栏计数：>=1万 收敛为 x.x万（去 .0 尾），对齐官方 1.5W 口径 */
+  private formatEngagementCount(num: number): string {
+    if (num < 10000) {
+      return `${num}`;
+    }
+    const v: string = (num / 10000).toFixed(1);
+    return `${v.endsWith('.0') ? v.substring(0, v.length - 2) : v}万`;
+  }
+
+  private replyViewportInset(): number {
+    return this.floatingPageBars && !this.isSplit ? THREAD_DETAIL_TITLE_BAR_HEIGHT : 4;
+  }
+
+  /** 将回复表头滚到顶栏下方。 */
+  private scrollToReplies(): void {
+    try {
+      const uiUtils = this.getUIContext().getComponentUtils();
+      const targetRect = uiUtils.getRectangleById('reply_section_anchor');
+      const scrollRect = uiUtils.getRectangleById('thread_scroll_content');
+      if (!targetRect || !scrollRect) {
+        return;
+      }
+      const currentY = this.scroller.currentOffset().yOffset;
+      const targetY = this.getUIContext().px2vp(targetRect.windowOffset.y - scrollRect.windowOffset.y)
+        + currentY - this.replyViewportInset();
+      this.scroller.scrollTo({ xOffset: 0, yOffset: Math.max(0, targetY), animation: true });
+    } catch (e) {
+      // 部分 SDK 版本缺少 getComponentUtils，静默降级（不滚动）
     }
   }
 
@@ -3158,138 +3144,29 @@ struct ThreadDetail {
 
   private async doToggleFloorLike(floor: FloorItem): Promise<void> {
     const previous: boolean = floor.isLiked ?? false;
-    const next: boolean = !previous;
-    const floorId = floor.floorId;
-
-    // 乐观更新
-    const nextFloors: FloorItem[] = this.floors.map((f: FloorItem): FloorItem => {
-      if (f.floorId === floorId) {
-        const currentCount = f.likeCount ?? 0;
-        return {
-          floorId: f.floorId, floor: f.floor, author: f.author,
-          authorAvatar: f.authorAvatar, authorId: f.authorId,
-          contentText: f.contentText, images: f.images,
-          fragments: f.fragments,
-          createTime: f.createTime, isAuthor: f.isAuthor,
-          comments: f.comments, commentsTotal: f.commentsTotal,
-          commentsHasMore: f.commentsHasMore,
-          likeCount: currentCount + (next ? 1 : -1),
-          isLiked: next,
-          level: f.level, ipLocation: f.ipLocation,
-        };
-      }
-      return f;
-    });
-    this.floors = nextFloors;
-    this.updateFloorDataSourceItem(floorId, nextFloors);
-
+    const count: number = floor.likeCount ?? 0;
+    this.setFloorLikeState(floor.floorId, !previous, Math.max(0, count + (previous ? -1 : 1)));
     try {
-      await TiebaService.getInstance().togglePostAgree(this.tid, floorId, next, 1);
+      await TiebaService.getInstance().togglePostAgree(this.tid, floor.floorId, !previous, 1);
       TiebaService.getInstance().invalidateThreadDetailCache(this.threadDetailCacheKey());
       Haptic.light();
     } catch (e) {
-      // 回滚
-      const rollbackFloors: FloorItem[] = this.floors.map((f: FloorItem): FloorItem => {
-        if (f.floorId === floorId) {
-          const currentCount = f.likeCount ?? 0;
-          return {
-            floorId: f.floorId, floor: f.floor, author: f.author,
-            authorAvatar: f.authorAvatar, authorId: f.authorId,
-            contentText: f.contentText, images: f.images,
-            fragments: f.fragments,
-            createTime: f.createTime, isAuthor: f.isAuthor,
-            comments: f.comments, commentsTotal: f.commentsTotal,
-            commentsHasMore: f.commentsHasMore,
-            likeCount: currentCount + (next ? -1 : 1),
-            isLiked: previous,
-            level: f.level, ipLocation: f.ipLocation,
-          };
-        }
-        return f;
-      });
-      this.floors = rollbackFloors;
-      this.updateFloorDataSourceItem(floorId, rollbackFloors);
-      const msg = (e as Error).message ?? '操作失败';
-      this.getUIContext().getPromptAction().showToast({ message: msg });
+      this.setFloorLikeState(floor.floorId, previous, count);
+      this.getUIContext().getPromptAction().showToast({ message: (e as Error).message ?? '操作失败' });
     }
   }
 
-  /**
-   * 楼中楼（楼层内嵌预览）点赞/取消点赞
-   */
-  private async toggleCommentLike(parentFloorId: string, comment: CommentItem): Promise<void> {
-    if (this.likeInFlight) {
-      return;
-    }
-    this.likeInFlight = true;
-    try {
-      await this.doToggleCommentLike(parentFloorId, comment);
-    } finally {
-      this.likeInFlight = false;
-    }
-  }
-
-  private async doToggleCommentLike(parentFloorId: string, comment: CommentItem): Promise<void> {
-    const previous: boolean = comment.isLiked ?? false;
-    const next: boolean = !previous;
-    const commentId: string = comment.commentId;
-    const floorId: string = parentFloorId;
-    // 防御：预览数据若缺失真实 id（commentId 形如 "xxx-comment-y" 的合成值），
-    // 该 ID 无法被服务端识别，直接提示并引导进详情页操作
-    if (!/^\d+$/.test(commentId)) {
-      this.getUIContext().getPromptAction().showToast({ message: '请进入楼中楼详情页点赞' });
-      return;
-    }
-
-    this.updateCommentLikeState(floorId, commentId, next, next ? 1 : -1);
-    try {
-      await TiebaService.getInstance().togglePostAgree(this.tid, commentId, next, 2);
-      Haptic.light();
-    } catch (e) {
-      this.updateCommentLikeState(floorId, commentId, previous, next ? -1 : 1);
-      const msg = (e as Error).message ?? '操作失败';
-      this.getUIContext().getPromptAction().showToast({ message: msg });
-    }
-  }
-
-  // 更新指定楼层下某条楼中楼的点赞状态（乐观更新/回滚共用）
-  private updateCommentLikeState(floorId: string, commentId: string, likedState: boolean, delta: number): void {
-    const nextFloors: FloorItem[] = this.floors.map((f: FloorItem): FloorItem => {
-      if (f.floorId !== floorId) {
-        return f;
+  private setFloorLikeState(floorId: string, liked: boolean, count: number): void {
+    const nextFloors: FloorItem[] = this.floors.map((floor: FloorItem): FloorItem => {
+      if (floor.floorId !== floorId) {
+        return floor;
       }
-      const updatedComments: CommentItem[] = (f.comments ?? []).map((c: CommentItem): CommentItem => {
-        if (c.commentId !== commentId) {
-          return c;
-        }
-        return {
-          commentId: c.commentId,
-          author: c.author,
-          authorAvatar: c.authorAvatar,
-          authorId: c.authorId,
-          parentPostId: c.parentPostId,
-          replyToId: c.replyToId,
-          content: c.content,
-          images: c.images,
-          fragments: c.fragments,
-          floor: c.floor,
-          createTime: c.createTime,
-          isAuthor: c.isAuthor,
-          level: c.level,
-          isLiked: likedState,
-          likeCount: (c.likeCount ?? 0) + delta,
-        };
-      });
       return {
-        floorId: f.floorId, floor: f.floor, author: f.author,
-        authorAvatar: f.authorAvatar, authorId: f.authorId,
-        contentText: f.contentText, images: f.images,
-        fragments: f.fragments,
-        createTime: f.createTime, isAuthor: f.isAuthor,
-        comments: updatedComments, commentsTotal: f.commentsTotal,
-        commentsHasMore: f.commentsHasMore,
-        likeCount: f.likeCount, isLiked: f.isLiked,
-        level: f.level, ipLocation: f.ipLocation,
+        floorId: floor.floorId, floor: floor.floor, author: floor.author, authorId: floor.authorId,
+        authorAvatar: floor.authorAvatar, contentText: floor.contentText, images: floor.images, fragments: floor.fragments,
+        createTime: floor.createTime, isAuthor: floor.isAuthor, comments: floor.comments,
+        commentsTotal: floor.commentsTotal, commentsHasMore: floor.commentsHasMore, likeCount: count, isLiked: liked,
+        level: floor.level, ipLocation: floor.ipLocation
       };
     });
     this.floors = nextFloors;
@@ -3302,142 +3179,6 @@ struct ThreadDetail {
     if (idx >= 0) {
       this.floorDataSource.updateItem(idx, items[idx]);
     }
-  }
-
-  /**
-   * 楼中楼预览点赞补齐。
-   * pb/page 详情接口返回的楼中楼预览（sub_post）只有内容、不含点赞字段，
-   * 因此 ThreadDetail 楼中楼预览点赞数恒为 0。这里对"含楼中楼"的楼层逐个调用
-   * pb/floor 接口（与 SubPostDetail 同源，含真实点赞数/已赞状态），按 commentId
-   * 将点赞信息合并回预览条目，使预览与楼中楼详情页数据一致。
-   * 全程后台静默：失败忽略、串行 + 间隔请求，不打断用户浏览。
-   */
-  /**
-   * §Z4a（2026-09-19）：首屏缺赞补齐的延后调度。
-   * 原来紧跟 fadeInContent 立刻开跑，与首屏渲染 / 下一页预取同抢连接池；延后 400ms 起跑，
-   * 预览点赞是次要信息，晚几百毫秒无感。
-   * 延后窗口内 loadMore 若已用即时补齐拿走 enrichingSubPostLikes 锁（行为与改造前一致，未改），
-   * 本次回调不放弃而是按重试间隔轮询：subPostLikesFetched 让每层只补一次，
-   * 故轮询只会挑出「尚未补齐」的楼层（含被抢先的首页楼层），不会重复请求、也不会永久停在 0。
-   */
-  /** §Z4a：清理延后补齐调度器（重排前 + 退页时调用） */
-  private clearEnrichTimer(): void {
-    if (this.enrichTimer !== -1) {
-      clearTimeout(this.enrichTimer);
-      this.enrichTimer = -1;
-    }
-  }
-
-  private scheduleSubPostPreviewEnrich(delayMs: number = SUBPOST_ENRICH_DELAY_MS): void {
-    if (this.enrichTimer !== -1) {
-      return;
-    }
-    this.enrichTimer = setTimeout((): void => {
-      this.enrichTimer = -1;
-      if (this.enrichingSubPostLikes) {
-        this.scheduleSubPostPreviewEnrich(SUBPOST_ENRICH_RETRY_MS);
-        return;
-      }
-      this.enrichSubPostPreviewLikes(this.floors);
-    }, delayMs);
-  }
-
-  private enrichSubPostPreviewLikes(floors: FloorItem[]): void {
-    if (this.enrichingSubPostLikes) {
-      return;
-    }
-    const targets: FloorItem[] = (floors ?? []).filter((f: FloorItem): boolean =>
-      /^\d+$/.test(f.floorId) && (f.comments ?? []).length > 0 && !this.subPostLikesFetched.has(f.floorId))
-      .slice(0, 12); // 每批最多补 12 个含楼中楼的楼层（用户可见区），避免请求过多触发风控
-    if (targets.length === 0) {
-      return;
-    }
-    this.enrichingSubPostLikes = true;
-    targets.forEach((f: FloorItem): void => { this.subPostLikesFetched.add(f.floorId); });
-    const runNext = (idx: number): void => {
-      if (idx >= targets.length) {
-        this.enrichingSubPostLikes = false;
-        return;
-      }
-      const floor: FloorItem = targets[idx];
-      TiebaService.getInstance().fetchSubPostDetail(this.tid, floor.floorId, this.forumId, floor.floor)
-        .then((res: SubPostDetail): void => { this.mergeSubPostLikeCounts(floor.floorId, res.comments); })
-        .catch(() => { /* 单楼层补齐失败静默，预览保持原值 */ })
-        .finally((): void => {
-          setTimeout((): void => {
-            // 退页守卫：串行补齐链最多 12 层自续，销毁后不再发请求 / 写 @State
-            if (!this.pageAlive) {
-              return;
-            }
-            runNext(idx + 1);
-          }, 120);
-        });
-    };
-    runNext(0);
-  }
-
-  // 将 pb/floor 返回的完整楼中楼数据中的点赞信息，按 commentId 合并回预览条目（不改变预览条数/顺序）
-  private mergeSubPostLikeCounts(floorId: string, fetched: CommentItem[]): void {
-    if (!fetched || fetched.length === 0) {
-      return;
-    }
-    const likeById: Map<string, CommentItem> = new Map<string, CommentItem>();
-    fetched.forEach((fc: CommentItem): void => {
-      if (fc.commentId.length > 0) {
-        likeById.set(fc.commentId, fc);
-      }
-    });
-    let changed: boolean = false;
-    const nextFloors: FloorItem[] = this.floors.map((f: FloorItem): FloorItem => {
-      if (f.floorId !== floorId) {
-        return f;
-      }
-      const comments: CommentItem[] = (f.comments ?? []).map((c: CommentItem): CommentItem => {
-        const fc: CommentItem | undefined = likeById.get(c.commentId);
-        if (!fc) {
-          return c;
-        }
-        const likeCount: number = Number(fc.likeCount ?? 0);
-        const isLiked: boolean = fc.isLiked === true;
-        if ((c.likeCount ?? 0) === likeCount && (c.isLiked ?? false) === isLiked) {
-          return c;
-        }
-        changed = true;
-        return {
-          commentId: c.commentId,
-          author: c.author,
-          authorAvatar: c.authorAvatar,
-          authorId: c.authorId,
-          parentPostId: c.parentPostId,
-          replyToId: c.replyToId,
-          content: c.content,
-          images: c.images,
-          fragments: c.fragments,
-          floor: c.floor,
-          createTime: c.createTime,
-          isAuthor: c.isAuthor,
-          level: c.level,
-          isLiked: isLiked,
-          likeCount: likeCount,
-        };
-      });
-      return {
-        floorId: f.floorId, floor: f.floor, author: f.author,
-        authorAvatar: f.authorAvatar, authorId: f.authorId,
-        contentText: f.contentText, images: f.images,
-        fragments: f.fragments,
-        createTime: f.createTime, isAuthor: f.isAuthor,
-        comments: comments, commentsTotal: f.commentsTotal,
-        commentsHasMore: f.commentsHasMore,
-        likeCount: f.likeCount, isLiked: f.isLiked,
-        level: f.level, ipLocation: f.ipLocation,
-      };
-    });
-    if (!changed) {
-      return;
-    }
-    this.floors = nextFloors;
-    this.updateFloorDataSourceItem(floorId, nextFloors);
   }
 
   /**
@@ -3717,16 +3458,18 @@ struct ThreadDetail {
   @Builder
   PostHeader() {
     Column({ space: Spacing.md }) {
+      // 官方样式·主楼头部：头像 | 昵称+等级徽章 / 时间 | 右侧「+ 关注」胶囊（已关注灰描边态）
       Row({ space: Spacing.sm }) {
-        this.Avatar(this.detail!.authorAvatar ?? '', this.detail!.author, 38, this.detail!.authorId ?? '')
+        this.Avatar(this.detail!.authorAvatar ?? '', this.detail!.author, 40, this.detail!.authorId ?? '')
         Column({ space: 2 }) {
           Row({ space: 6 }) {
             Text(this.detail!.author || '贴吧用户')
-              .fontSize(fs(14, this.fontScale))
+              .fontSize(fs(15, this.fontScale))
               .fontWeight(FontWeight.Medium)
               .fontColor(Theme.textPrimary(this.isDark))
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .constraintSize({ maxWidth: '60%' })
               .onClick(() => {
                 this.openUserProfile(this.detail!.authorId ?? '', this.detail!.author);
               })
@@ -3740,20 +3483,28 @@ struct ThreadDetail {
                 .padding({ left: 5, right: 5, top: 1, bottom: 1 })
             }
           }
-          Row({ space: 6 }) {
-            Text('楼主')
-              .fontSize(fs(11, this.fontScale))
-              .fontColor(Theme.brand())
-            if ((this.detail?.createTime ?? '').length > 0) {
-              Text(`· ${this.formatFloorTime(this.detail!.createTime)}`)
-                .fontSize(fs(11, this.fontScale))
-                .fontColor(Theme.textSecondary(this.isDark))
-            }
+          if ((this.detail?.createTime ?? '').length > 0) {
+            Text(this.formatFloorTime(this.detail!.createTime))
+              .fontSize(fs(10, this.fontScale))
+              .fontColor(Theme.textTertiary(this.isDark))
           }
         }
         .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        Button(this.authorFollowed ? '已关注' : '关注')
+          .fontSize(fs(12, this.fontScale))
+          .fontColor(this.authorFollowed ? Theme.textSecondary(this.isDark) : Theme.brand())
+          .fontWeight(FontWeight.Medium)
+          .backgroundColor(this.authorFollowed ? Color.Transparent : Theme.brandBg(this.isDark))
+          .border({ width: this.authorFollowed ? 0.5 : 0, color: Theme.divider(this.isDark) })
+          .height(28)
+          .padding({ left: 12, right: 12 })
+          .borderRadius(Radius.full)
+          .enabled(!this.followBusy)
+          .onClick(() => { this.toggleFollowAuthor(); })
       }
       .width('100%')
+      .alignItems(VerticalAlign.Center)
 
       // 帖子标题同样支持长按选中复制（无 onClick 无手势冲突，独立可选区域）；
       // 纪元重建清选中（复制成功 → toast + title 纪元自增 → 节点重建）
@@ -3768,53 +3519,176 @@ struct ThreadDetail {
           .onCopy(() => { this.onTextCopied('title'); })
       }, (titleCopyEpoch: number) => `title_${titleCopyEpoch}`)
 
-      this.RichTextContent(this.detail!.fragments ?? [], this.detail!.contentText || '（楼主未提供正文）', fs(17), Theme.textPrimary(this.isDark), 28, 'main')
+      this.RichTextContent(this.detail!.fragments ?? [], this.detail!.contentText || '（楼主未提供正文）', fs(16), Theme.textPrimary(this.isDark), 30, 'main')
 
       if (this.detail!.images.length > 0) {
         // 通栏主楼：capMaxWidth=true（336 封顶防拉伸）
         this.ImageGrid(this.detail!.images, true, false)
       }
 
+      // 官方样式·互动数据栏：分享 / 评论 / 点赞 三组均分（评论滚动定位回复区，点赞走 toggleLike）
+      Row() {
+        Row({ space: 5 }) {
+          SymbolGlyph($r('sys.symbol.share'))
+            .fontSize(fs(14, this.fontScale))
+            .fontColor([$r('sys.color.icon_secondary')])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+            .hitTestBehavior(HitTestMode.None)
+          Text((this.detail?.shareCount ?? 0) > 0 ? this.formatEngagementCount(this.detail!.shareCount!) : '分享')
+            .fontSize(fs(11, this.fontScale))
+            .fontColor($r('sys.color.font_secondary'))
+            .hitTestBehavior(HitTestMode.None)
+        }
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+        .onClick(() => { this.shareThread(this.buildSharePayload()); })
+
+        Row({ space: 5 }) {
+          SymbolGlyph($r('sys.symbol.ellipsis_message_1'))
+            .fontSize(fs(14, this.fontScale))
+            .fontColor([$r('sys.color.icon_secondary')])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+            .hitTestBehavior(HitTestMode.None)
+          Text(this.formatEngagementCount(this.detail?.replyNum ?? 0))
+            .fontSize(fs(11, this.fontScale))
+            .fontColor($r('sys.color.font_secondary'))
+            .hitTestBehavior(HitTestMode.None)
+        }
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+        .onClick(() => { this.scrollToReplies(); })
+
+        Row({ space: 5 }) {
+          SymbolGlyph($r('sys.symbol.hand_thumbsup'))
+            .fontSize(fs(14, this.fontScale))
+            .fontColor([this.liked ? $r('sys.color.icon_emphasize') : $r('sys.color.icon_secondary')])
+            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+            .hitTestBehavior(HitTestMode.None)
+          Text(this.formatEngagementCount(this.detail?.likeCount ?? 0))
+            .fontSize(fs(11, this.fontScale))
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.liked ? $r('sys.color.icon_emphasize') : $r('sys.color.font_secondary'))
+            .hitTestBehavior(HitTestMode.None)
+        }
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+        .onClick(() => { this.toggleLike(); })
+      }
+      .width('100%')
+      .padding({ top: 2, bottom: 2 })
+
+      // 官方样式·吧信息卡：浅蓝横条（吧头像 + 吧名 + 进吧），与官方详情页同位（互动栏下方、回复区上方）
+      Row({ space: Spacing.sm }) {
+        Stack() {
+          Text((this.detail!.forumName || this.forumName || '吧').substring(0, 1))
+            .width(36)
+            .height(36)
+            .fontSize(15)
+            .fontColor(Color.White)
+            .textAlign(TextAlign.Center)
+            .backgroundColor(Theme.brand())
+            .borderRadius(Radius.full)
+          if ((this.detail?.forumAvatar ?? '').trim().length > 0) {
+            Image(this.detail!.forumAvatar!.trim())
+              .width(36)
+              .height(36)
+              .borderRadius(Radius.full)
+              .objectFit(ImageFit.Cover)
+              .clip(true)
+          }
+        }
+        .width(36)
+        .height(36)
+        Text(`${this.detail!.forumName || this.forumName}吧`)
+          .fontSize(fs(14, this.fontScale))
+          .fontWeight(FontWeight.Medium)
+          .fontColor(Theme.textPrimary(this.isDark))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+        Button('进吧')
+          .fontSize(fs(12, this.fontScale))
+          .fontColor(Color.White)
+          .fontWeight(FontWeight.Medium)
+          .backgroundColor(Theme.brand())
+          .height(30)
+          .padding({ left: 14, right: 14 })
+          .borderRadius(Radius.full)
+          .onClick(() => { this.openForumHome(); })
+      }
+      .width('100%')
+      .padding({ left: Spacing.md, right: Spacing.md, top: 10, bottom: 10 })
+      .backgroundColor(this.isDark ? '#17222E' : '#EBF3FC')
+      .borderRadius(Radius.md * this.cardRadiusScale)
     }
     .width('100%')
-    .padding(Spacing.lg)
-    .backgroundColor(Theme.bgCard(this.isDark))
-    // 卡片圆角 26：比全局 Radius.lg（=16）更圆、比 32 收敛（32 观感过大，真机反馈收一档）。
-    // 不走全局令牌（改 Radius.lg 会波及全工程），此处按详情页卡片单独写死。
-    .borderRadius(26)
+    // 官方样式（2026-11-10）：主楼去卡片化，直接铺在页面白底上（横向留白由外层 Scroll padding 提供）；
+    // 多列瀑布流档（灰底）保留卡片观感，与右栏楼层卡一致。
+    .padding(this.replyColumns() > 1 ? Spacing.lg : 0)
+    .backgroundColor(this.replyColumns() > 1 ? Theme.bgCard(this.isDark) : Color.Transparent)
+    .borderRadius(this.replyColumns() > 1 ? 26 * this.cardRadiusScale : 0)
     .alignItems(HorizontalAlign.Start)
   }
 
   @Builder
   ReplySectionHeader() {
-    Row({ space: Spacing.sm }) {
-      Text('回复')
-        .fontSize(fs(16, this.fontScale))
-        .fontWeight(FontWeight.Bold)
-        .fontColor(Theme.textPrimary(this.isDark))
-      Text(`${this.detail?.replyNum ?? 0} 条`)
-        .fontSize(fs(12, this.fontScale))
-        .fontColor(Theme.textTertiary(this.isDark))
+    Row({ space: 10 }) {
+      Text('全部回复')
+        .fontSize(fs(14, this.fontScale))
+        .fontWeight(this.seeLz ? FontWeight.Normal : FontWeight.Bold)
+        .fontColor(this.seeLz ? Theme.textTertiary(this.isDark) : Theme.textPrimary(this.isDark))
+        .onClick(() => {
+          if (this.seeLz) {
+            this.seeLz = false;
+            this.loadDetail();
+          }
+        })
+      Text('只看楼主')
+        .fontSize(fs(14, this.fontScale))
+        .fontWeight(this.seeLz ? FontWeight.Bold : FontWeight.Normal)
+        .fontColor(this.seeLz ? Theme.textPrimary(this.isDark) : Theme.textTertiary(this.isDark))
+        .onClick(() => {
+          if (!this.seeLz) {
+            this.seeLz = true;
+            this.loadDetail();
+          }
+        })
+      Blank()
+      Row() {
+        this.ReplySortOption('热门', 2)
+        this.ReplySortOption('正序', 0)
+        this.ReplySortOption('倒序', 1)
+      }
+      .padding(2)
+      .backgroundColor(Theme.bg(this.isDark))
+      .borderRadius(Radius.full)
     }
     .width('100%')
-    .padding({ left: 4, right: 4, top: 2, bottom: 2 })
+    .height(THREAD_REPLY_HEADER_HEIGHT)
+    .alignItems(VerticalAlign.Center)
   }
 
-  /**
-   * 幽灵回复表头（横屏分栏·左栏专用，2026-09-13）：与 `ReplySectionHeader` **同几何**的透明占位行
-   * —— 右栏第一排卡片上方有「回复 N 条」表头 + space 12，左栏主楼卡顶需与之对齐。
-   * 结构 / 字号 / padding 与真表头逐项一致（字号缩放自动同步），仅文字为空格 → 撑高等高、不显示。
-   */
+  @Builder
+  ReplySortOption(label: string, sort: number) {
+    Text(label)
+      .fontSize(fs(12, this.fontScale))
+      .fontColor(this.sortType === sort ? Theme.textPrimary(this.isDark) : Theme.textTertiary(this.isDark))
+      .fontWeight(this.sortType === sort ? FontWeight.Medium : FontWeight.Normal)
+      .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+      .backgroundColor(this.sortType === sort ? Theme.bgCard(this.isDark) : Color.Transparent)
+      .borderRadius(Radius.full)
+      .id('thread_reply_sort_' + sort)
+      .onClick(() => {
+        if (this.sortType !== sort) {
+          this.sortType = sort;
+          this.loadDetail();
+        }
+      })
+  }
+
   @Builder
   ReplyHeaderGhost() {
-    Row({ space: Spacing.sm }) {
-      Text(' ')
-        .fontSize(fs(16, this.fontScale))
-        .fontWeight(FontWeight.Bold)
-        .width('100%')
-        .padding({ left: 4, right: 4, top: 2, bottom: 2 })
-    }
-    .width('100%')
+    Column().width('100%').height(THREAD_REPLY_HEADER_HEIGHT)
   }
 
   // ===== 平板适配 §4.9（2026-09-13 错位修复二：弃 WaterFlow+sections，改列内独立堆叠）=====
@@ -3847,13 +3721,22 @@ struct ThreadDetail {
       .width('100%')
       .alignItems(VerticalAlign.Top)
     } else {
-      // 单列档：卡片间距收紧到 Spacing.sm(8)。外层通栏 Column 的 space=md(12) 本是给主楼 / 表头 /
-      // 哨兵之间用的，单列时 ForEach 直接展开会被它一并套用 → 楼层卡之间偏松（2026-09-18 真机反馈）。
-      // 此处独立容器给 sm，只影响单列卡间距；表头 / 哨兵与外层的间距（12）不变，多列档列内间距（md）不变。
-      Column({ space: Spacing.sm }) {
-        // P4：单列同样只渲染挂载前缀
-        ForEach(this.mountedFloors(), (floor: FloorItem) => {
-          this.FloorCardItem(floor)
+      // 单列档（2026-11-10 官方样式）：楼层去卡片化平铺白底，楼层间以 0.5vp 分割线分隔
+      // （首层无分割线），层内上下留白由 FloorCard 单列 padding（10+10）承担。
+      // 多列档仍为卡片（灰底白卡），卡片间距沿用 Spacing.md，互不影响。
+      Column() {
+        // 保留渐进挂载；滑到底时先显示当前已取得的楼层。
+        ForEach(this.mountedFloors(), (floor: FloorItem, floorIdx: number) => {
+          Column() {
+            if ((floorIdx ?? 0) > 0) {
+              Divider()
+                .vertical(false)
+                .strokeWidth(0.5)
+                .color(Theme.divider(this.isDark))
+            }
+            this.FloorCardItem(floor)
+          }
+          .width('100%')
         }, (floor: FloorItem) => `${floor.floorId}_${floor.floor}`)
       }
       .width('100%')
@@ -3927,8 +3810,8 @@ struct ThreadDetail {
     .id('floor_' + floor.floorId)
     .width('100%')
     .backgroundColor(this.highlightFloorId === floor.floorId ? (this.isDark ? '#1A3173FF' : '#1A3173FF') : Color.Transparent)
-    // 高亮底色层：圆角必须与楼层卡（26）一致，否则高亮时外角会露出直角/小圆角
-    .borderRadius(this.highlightFloorId === floor.floorId ? 26 : 0)
+    // 高亮底色层：圆角与楼层形态一致 —— 多列卡片 26，单列平铺 12（无卡缘，轻圆角高亮块即可）
+    .borderRadius(this.highlightFloorId === floor.floorId ? (this.replyColumns() > 1 ? 26 * this.cardRadiusScale : 12 * this.cardRadiusScale) : 0)
     .clip(true)
   }
 
@@ -3965,12 +3848,17 @@ struct ThreadDetail {
                 .padding({ left: 12, right: 12, top: 8, bottom: 8 })
                 .onClick(() => { this.loadMoreFloors(); })
             }
-            // 静默态（后台预取在途且未超时）：不显形、不转圈，仅留等高占位
+            if (!this.loadingMore && !this.loadMoreFailed && this.mountedFloorCount >= this.floors.length) {
+              Text('加载更多回复')
+                .fontSize(fs(12, this.fontScale))
+                .fontColor(Theme.textSecondary(this.isDark))
+                .onClick(() => { this.loadMoreFloors(); })
+            }
           }
           .width('100%')
           .height(DETAIL_FOOTER_SENTINEL_H)
           .justifyContent(FlexAlign.Center)
-        } else if (this.floors.length > 0) {
+        } else if (this.floors.length > 0 && this.mountedFloorCount >= this.floors.length) {
           // 与加载态统一等高：最后一批追加完成时哨兵高度不变，视口零位移
           Text('— 已经到底啦 —')
             .fontSize(fs(12, this.fontScale))
@@ -3987,277 +3875,153 @@ struct ThreadDetail {
   // ForEach key = floorId_floor，稳定复用节点；楼层数据变化由 @State floors 驱动整楼重绘。
   @Builder
   FloorCard(floor: FloorItem) {
-    Column({ space: Spacing.sm }) {
-      // 楼层头部
-      Row({ space: Spacing.sm }) {
-        this.Avatar(floor.authorAvatar ?? '', floor.author, 36, floor.authorId ?? '')
-        Column({ space: 4 }) {
-          Row({ space: 6 }) {
-            Text(floor.author || '贴吧用户')
-              .fontSize(fs(14, this.fontScale))
-              .fontWeight(FontWeight.Medium)
-              .fontColor(Theme.textPrimary(this.isDark))
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .onClick(() => {
-                this.openUserProfile(floor.authorId ?? '', floor.author);
-              })
-            // 等级徽章
-            if (floor.level !== undefined) {
-              Text(`${floor.level}`)
-                .fontSize(fs(10, this.fontScale))
-                .fontColor(Color.White)
-                .fontWeight(FontWeight.Bold)
-                .backgroundColor(Theme.levelColor(floor.level ?? 0))
-                .borderRadius(Radius.sm)
-                .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-            }
-            // 楼主标签
-            if (floor.isAuthor) {
-              Text('楼主')
-                .fontSize(fs(10, this.fontScale))
-                .fontColor(Color.White)
-                .backgroundColor(Theme.brand())
-                .borderRadius(Radius.sm)
-                .padding({ left: 6, right: 6, top: 1, bottom: 1 })
-            }
+    Row({ space: 7 }) {
+      this.Avatar(floor.authorAvatar ?? '', floor.author, 34, floor.authorId ?? '')
+      Column({ space: 4 }) {
+        Row({ space: 5 }) {
+          Text(floor.author || '贴吧用户')
+            .fontSize(fs(14, this.fontScale))
+            .fontColor(Theme.textSecondary(this.isDark))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: '74%' })
+            .onClick(() => { this.openUserProfile(floor.authorId ?? '', floor.author); })
+          if ((floor.level ?? 0) > 0) {
+            Text('Lv.' + floor.level)
+              .fontSize(fs(9, this.fontScale))
+              .fontColor(Color.White)
+              .fontWeight(FontWeight.Bold)
+              .backgroundColor(Theme.levelColor(floor.level ?? 0))
+              .borderRadius(Radius.sm)
+              .padding({ left: 4, right: 4 })
           }
-          .width('100%')
-          .justifyContent(FlexAlign.Start)
-          // 时间 · 楼层 · IP —— 左对齐与用户名对齐
-          Row({ space: 0 }) {
-            Text(this.formatFloorTime(floor.createTime))
-              .fontSize(fs(11, this.fontScale))
-              .fontColor(Theme.textSecondary(this.isDark))
-            if (floor.floor > 0) {
-              Text(` · 第${floor.floor}楼`)
-                .fontSize(fs(11, this.fontScale))
-                .fontColor(Theme.textSecondary(this.isDark))
-            }
-            if (floor.ipLocation && floor.ipLocation.length > 0) {
-              Text(` · 来自${floor.ipLocation}`)
-                .fontSize(fs(11, this.fontScale))
-                .fontColor(Theme.textTertiary(this.isDark))
-            }
+          if (floor.isAuthor) {
+            Text('楼主')
+              .fontSize(fs(10, this.fontScale))
+              .fontColor(Theme.brand())
           }
-          .width('100%')
-          .justifyContent(FlexAlign.Start)
         }
-        .layoutWeight(1)
-        Blank()
-        // 楼层点赞按钮 — 使用 Button 组件确保点击可靠
-        Button({ type: ButtonType.Circle }) {
+        .width('100%')
+
+        if (floor.contentText.length > 0 || (floor.fragments ?? []).length > 0) {
+          this.RichTextContent(floor.fragments ?? [], floor.contentText, fs(16, this.fontScale),
+            Theme.textPrimary(this.isDark), fs(23, this.fontScale), 'floor_' + floor.floorId)
+        }
+        if (floor.images.length > 0) {
+          this.ImageGrid(floor.images, true, false)
+        }
+        Row({ space: 7 }) {
+          Text((floor.floor > 0 ? '第' + floor.floor + '楼 ' : '') + this.formatFloorTime(floor.createTime) +
+            (floor.ipLocation ? ' ' + floor.ipLocation : ''))
+            .fontSize(fs(11, this.fontScale))
+            .fontColor(Theme.textTertiary(this.isDark))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text('回复')
+            .fontSize(fs(11, this.fontScale))
+            .fontColor(Theme.textSecondary(this.isDark))
+            .onClick(() => {
+              this.openReplyEditor({ floorId: floor.floorId, floor: floor.floor, author: floor.author });
+            })
+          Blank()
           Row({ space: 3 }) {
-            SymbolGlyph($r('sys.symbol.heart'))
-              .fontSize(fs(18, this.fontScale))
-              .fontColor([(floor.isLiked ?? false) ? $r('sys.color.icon_emphasize') : $r('sys.color.icon_secondary')])
-              .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-              .hitTestBehavior(HitTestMode.None)
-            Text(`${floor.likeCount ?? 0}`)
-              .fontSize(fs(12, this.fontScale))
-              .fontWeight(FontWeight.Medium)
-              .fontColor((floor.isLiked ?? false) ? $r('sys.color.icon_emphasize') : $r('sys.color.font_secondary'))
-              .hitTestBehavior(HitTestMode.None)
+            SymbolGlyph($r('sys.symbol.hand_thumbsup'))
+              .fontSize(14)
+              .fontColor([floor.isLiked ? Theme.brand() : Theme.textTertiary(this.isDark)])
+            Text((floor.likeCount ?? 0) > 0 ? this.formatEngagementCount(floor.likeCount ?? 0) : '赞')
+              .fontSize(fs(11, this.fontScale))
+              .fontColor(floor.isLiked ? Theme.brand() : Theme.textTertiary(this.isDark))
           }
-          .hitTestBehavior(HitTestMode.None)
+          .height(24)
+          .accessibilityText(floor.isLiked ? '取消点赞' : '点赞')
+          .onClick(() => { this.toggleFloorLike(floor); })
         }
-        .width(56)
-        .height(36)
-        .backgroundColor(Color.Transparent)
-        .onClick(() => { this.toggleFloorLike(floor); })
-      }
-      .width('100%')
-      .hitTestBehavior(HitTestMode.Transparent)
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
 
-      // 正文
-      this.RichTextContent(floor.fragments ?? [], floor.contentText, fs(16), Theme.textPrimary(this.isDark), 26, `floor_${floor.floorId}`)
-
-      if (floor.images.length > 0) {
-        // 列内楼层卡：capMaxWidth=true（2026-09-16 拍板「宫格图片不要拉伸」——平板 2 列后列宽 ≈494 > 336，
-        // 跟随列宽会把宫格拉宽、格宽 164 vs 格高 120 横向拉伸；封顶 336 后格宽 108/格高 120 ≈ 手机档比例。
-        // 3 列 / 单列档列宽 ≤ 336 封顶不生效逐像素不变；楼层卡根 Column 已 alignItems Start → 限宽后靠左）
-        this.ImageGrid(floor.images, true, false)
+        if ((floor.comments ?? []).length > 0 || (floor.commentsTotal ?? 0) > 0 || floor.commentsHasMore) {
+          this.CommentList(floor)
+        }
       }
-      if ((floor.comments ?? []).length > 0 || (floor.commentsTotal ?? 0) > 0) {
-        this.CommentList(floor.comments ?? [], floor.commentsTotal ?? (floor.comments ?? []).length, floor.commentsHasMore === true, floor.floorId, floor.floor)
-      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
-    .padding(Spacing.lg)
-    .backgroundColor(Theme.bgCard(this.isDark))
-    // 卡片圆角 26：与楼主卡、首页 ThreadCard 统一（不借用全局令牌 Radius.lg）
-    .borderRadius(26)
-    .alignItems(HorizontalAlign.Start)
+    .alignItems(VerticalAlign.Top)
+    .padding({
+      left: this.replyColumns() > 1 ? Spacing.lg : 0,
+      right: this.replyColumns() > 1 ? Spacing.lg : 0,
+      top: this.replyColumns() > 1 ? Spacing.lg : 9,
+      bottom: this.replyColumns() > 1 ? Spacing.lg : 9
+    })
+    .backgroundColor(this.replyColumns() > 1 ? Theme.bgCard(this.isDark) : Color.Transparent)
+    .borderRadius(this.replyColumns() > 1 ? 26 * this.cardRadiusScale : 0)
   }
 
   @Builder
-  CommentList(comments: CommentItem[], total: number = comments.length, hasMore: boolean = false, parentPid: string = '', parentFloor: number = 0) {
-    Column({ space: 8 }) {
-      Text(`${total} 条楼中楼回复`)
-        .fontSize(fs(13, this.fontScale))
-        .fontColor(Theme.textTertiary(this.isDark))
-        // 标题文字水平居中显示
-        .width('100%')
-        .textAlign(TextAlign.Center)
-      ForEach(comments, (comment: CommentItem, commentIndex: number) => {
-        Column() {
-          Stack({ alignContent: Alignment.TopEnd }) {
-            Row({ space: Spacing.sm }) {
-              // 头像使用与主楼层一致的 36vp，保证左右绝对对齐
-              this.Avatar(comment.authorAvatar ?? '', comment.author, 36, comment.authorId ?? '')
-              Column({ space: 4 }) {
-                // 作者行：名称 + 等级徽章 + 楼主标签（与主楼层样式完全对齐）
-                Row({ space: 6 }) {
-                  Text(comment.author || '贴吧用户')
-                    .fontSize(fs(14, this.fontScale))
-                    .fontWeight(FontWeight.Medium)
-                    .fontColor(Theme.textPrimary(this.isDark))
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    .onClick(() => {
-                      this.openUserProfile(comment.authorId ?? '', comment.author);
-                    })
-                  if ((comment.level ?? 0) > 0) {
-                    Text(`${comment.level}`)
-                      .fontSize(fs(10, this.fontScale))
-                      .fontColor(Color.White)
-                      .fontWeight(FontWeight.Bold)
-                      .backgroundColor(Theme.levelColor(comment.level ?? 0))
-                      .borderRadius(Radius.sm)
-                      .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-                  }
-                  if (comment.isAuthor) {
-                    Text('楼主')
-                      .fontSize(fs(10, this.fontScale))
-                      .fontColor(Color.White)
-                      .backgroundColor(Theme.brand())
-                      .borderRadius(Radius.sm)
-                      .padding({ left: 6, right: 6, top: 1, bottom: 1 })
-                  }
-                }
-                .width('100%')
-                .justifyContent(FlexAlign.Start)
-                // 时间 · 楼中楼号
-                Row({ space: 0 }) {
-                  Text(this.formatFloorTime(comment.createTime))
-                    .fontSize(fs(11, this.fontScale))
-                    .fontColor(Theme.textSecondary(this.isDark))
-                  if ((comment.floor ?? 0) > 0) {
-                    Text(` · 楼${comment.floor}`)
-                      .fontSize(fs(11, this.fontScale))
-                      .fontColor(Theme.textSecondary(this.isDark))
-                  }
-                }
-                .width('100%')
-                .justifyContent(FlexAlign.Start)
-                // 正文（纯图回复去冒号头后无文本片段，整体跳过避免「（无文字内容）」兜底）
-                if ((comment.fragments ?? []).length > 0 || (comment.content ?? '').length > 0) {
-                  this.RichTextContent(comment.fragments ?? [], comment.content || '（无文字内容）', fs(16), Theme.textPrimary(this.isDark), 26, `cmt_${parentPid}_${comment.commentId}`)
-                }
-                if ((comment.images ?? []).length > 0) {
-                  // 同楼层卡：宫格 336 封顶防平板 2 列列宽拉伸（容器已 alignItems Start）
-                  // singlePreview=true：楼中楼图点开单张预览，不进主图流（2026-09-20 预览解耦）
-                  this.ImageGrid(comment.images ?? [], true, true)
-                }
-              }
-              .alignItems(HorizontalAlign.Start)
-              .layoutWeight(1)
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Top)
-            // 楼中楼点赞按钮：浮在右上角、不占行内宽度，使正文右边缘与主楼层正文右边缘对齐。
-            Button({ type: ButtonType.Circle }) {
-              Row({ space: 3 }) {
-                SymbolGlyph($r('sys.symbol.heart'))
-                  .fontSize(fs(18, this.fontScale))
-                  .fontColor([(comment.isLiked ?? false) ? $r('sys.color.icon_emphasize') : $r('sys.color.icon_secondary')])
-                  .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-                  .hitTestBehavior(HitTestMode.None)
-                // 始终显示点赞数，即使为 0，与主楼层保持一致
-                Text(`${comment.likeCount ?? 0}`)
-                  .fontSize(fs(12, this.fontScale))
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor((comment.isLiked ?? false) ? $r('sys.color.icon_emphasize') : $r('sys.color.font_secondary'))
-                  .hitTestBehavior(HitTestMode.None)
-              }
-              .hitTestBehavior(HitTestMode.None)
-            }
-            .width(56)
-            .height(36)
-            .backgroundColor(Color.Transparent)
-            .onClick(() => { this.toggleCommentLike(parentPid, comment); })
-          }
-          .width('100%')
-          // 左右 padding 清零，实现内部Row元素与主楼层Row元素左右绝对对齐
-          // 无链接卡（total<=3）的最后一条评论 padding-bottom 收 0：卡底留空 = 楼层卡 padding(16)，与顶部一致；
-          // 非最后一条或链接卡（total>3，间距由容器 space 8 提供）保持 8 不变
-          .padding({ left: 0, right: 0, top: 8, bottom: (total > 3 || (commentIndex ?? 0) < comments.length - 1) ? 8 : 0 })
-          // 评论分隔线：非最后一条时显示，左边距=头像36+space8=44vp，与正文左边缘对齐
-          if ((commentIndex ?? 0) < comments.length - 1) {
-            Divider()
-              .vertical(false)
-              .strokeWidth(0.5)
-              .color(Theme.divider(this.isDark))
-              .opacity(0.5)
-              .margin({ left: 44, right: 8 })
-          }
+  CommentList(floor: FloorItem) {
+    Column({ space: 3 }) {
+      ForEach((floor.comments ?? []).slice(0, THREAD_COMMENT_PREVIEW_COUNT), (comment: CommentItem) => {
+        this.RichTextContent(comment.fragments ?? [], comment.content || ((comment.images ?? []).length > 0 ? '[图片]' : ''),
+          fs(15 * this.subReplyScale, this.fontScale), Theme.textPrimary(this.isDark),
+          fs(21 * this.subReplyScale, this.fontScale), 'preview_' + comment.commentId, comment.author || '贴吧用户')
+      }, (comment: CommentItem) => comment.commentId)
+      if ((floor.commentsTotal ?? 0) > Math.min(floor.comments?.length ?? 0, THREAD_COMMENT_PREVIEW_COUNT)
+        || floor.commentsHasMore) {
+        Row({ space: 3 }) {
+          Text((floor.commentsTotal ?? 0) > 0 ? '查看' + floor.commentsTotal + '条回复' : '查看全部回复')
+            .fontSize(fs(14 * this.subReplyScale, this.fontScale))
+            .fontColor(this.isDark ? '#A2BBDD' : '#405C7F')
+          SymbolGlyph($r('sys.symbol.chevron_right'))
+            .fontSize(12)
+            .fontColor([this.isDark ? '#A2BBDD' : '#405C7F'])
         }
-        .width('100%')
-      }, (comment: CommentItem, commentIndex: number) => `${comment.commentId}_${comment.isLiked ? 1 : 0}_${comment.likeCount ?? 0}_${commentIndex ?? 0}`)
-      if (total > 3) {
-        Row() {
-          Blank()
-          Button(this.openingSubPost ? '正在打开楼中楼' : '查看更多楼中楼')
-            .fontSize(fs(12, this.fontScale))
-            .fontColor(Theme.brand())
-            .backgroundColor(Color.Transparent)
-            .enabled(!this.openingSubPost)
-            // 链接下沿到卡底由楼层卡 padding(Spacing.lg) 单层承担，与顶部用户名行上方留空(16)一致
-            .padding({ left: 0, right: 0, top: 2, bottom: 0 })
-            .onClick(() => { this.openSubPostDetail(parentPid, parentFloor, total); })
-          Blank()
-        }
-        .width('100%')
-        // 链接下移 6vp：卡底视觉留空 16→10（translate 不改布局占位，下方无后续内容，安全）
-        .translate({ y: 6 })
+        .margin({ top: 2 })
+        .id('subpost_open_' + floor.floorId)
+        .onClick(() => { this.openSubPostPanel(floor.floorId, floor.floor); })
       }
     }
     .width('100%')
-    // 外层左右padding清零，避免挤压内部Row的水平可用宽度导致元素错位
-    // 底部 padding 收 0：链接态由楼层卡 padding(16)+链接下移6 承担（视觉 10）；
-    // 无链接态由最后一条评论自身 padding-bottom(8)+楼层卡 padding(16) 承担（视觉 24），不再额外叠 10
-    .padding({ left: 0, right: 0, top: 10, bottom: 0 })
-    // 楼中楼预览容器底色与楼层卡同源（Theme.bgCard）：浅深档都与楼层卡同色，避免深色下出现"框中框"视觉冗余
-    .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(Radius.md)
+    .alignItems(HorizontalAlign.Start)
+    .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+    .backgroundColor(this.isDark ? '#24252B' : '#F3F2F7')
+    .borderRadius(Radius.md * this.cardRadiusScale)
+    .onClick(() => { this.openSubPostPanel(floor.floorId, floor.floor); })
   }
 
-  private openSubPostDetail(parentPid: string, parentFloor: number, total: number): void {
-    if (this.openingSubPost || parentPid.trim().length === 0 || total <= 3) {
-      return;
+  private openSubPostPanel(pid: string, floorNum: number, fromNotification: boolean = false): boolean {
+    if (this.showSubPosts || pid.trim().length === 0) {
+      return false;
     }
-    const normalizedPid: string = parentPid.trim();
-    if (normalizedPid.length === 0) {
-      this.getUIContext().getPromptAction().showToast({ message: '当前楼层信息暂不可用，请稍后重试' });
-      return;
+    this.subPostRequest = {
+      tid: this.tid,
+      parentPid: pid.trim(),
+      parentFloor: floorNum,
+      forumId: this.forumId,
+      parent: this.floors.find((floor: FloorItem): boolean => floor.floorId === pid),
+      notifyCommentPid: fromNotification ? this.notifyMsgPostId : undefined,
+      notifyReplyerId: fromNotification ? this.notifyReplyerId : undefined,
+      notifyContent: fromNotification ? this.notifyContent : undefined
+    };
+    this.showSubPosts = true;
+    return true;
+  }
+
+  @Builder
+  SubPostSheet() {
+    if (this.subPostRequest) {
+      SubPostReplyPanel({
+        request: this.subPostRequest!,
+        onClose: () => { this.showSubPosts = false; },
+        onReply: (comment?: CommentItem) => { this.openSubPostReply(comment); },
+        onParentLikeChanged: (pid: string, liked: boolean, count: number) => {
+          if (this.pageAlive) {
+            this.setFloorLikeState(pid, liked, count);
+            TiebaService.getInstance().invalidateThreadDetailCache(this.threadDetailCacheKey());
+          }
+        }
+      })
     }
-    this.openingSubPost = true;
-    this.getUIContext().getRouter().pushUrl({
-      url: 'pages/SubPostDetail',
-      params: {
-        tid: this.tid,
-        pid: normalizedPid,
-        floor: `${parentFloor}`,
-        forumId: this.forumId,
-        forumName: this.forumName,
-        parentAuthor: this.floors.find((floor: FloorItem): boolean => floor.floorId === normalizedPid)?.author ?? ''
-      }
-    }).then(() => {
-      this.openingSubPost = false;
-    }).catch(() => {
-      this.openingSubPost = false;
-      this.getUIContext().getPromptAction().showToast({ message: '楼中楼详情打开失败，请稍后重试' });
-    });
   }
 
   /**
@@ -4267,6 +4031,10 @@ struct ThreadDetail {
    * 其它飞行层残留 → 作废在途回调并撤层。
    */
   onBackPress(): boolean {
+    if (this.showSubPosts) {
+      this.showSubPosts = false;
+      return true;
+    }
     if (this.previewShow) {
       this.closeImagePreview();
       return true;
@@ -4284,7 +4052,6 @@ struct ThreadDetail {
 
   onPageShow(): void {
     this.fontSizeTick++;
-    this.openingSubPost = false;
     this.isDark = isDarkMode();
     // 沉浸阅读：返回本页（含从楼中楼返回）复位为「顶栏 / 底栏可见」，且丢弃旧滚动基线
     // （子页返回后滚动位置可能被楼层定位改过，拿旧基线算增量会误藏）
@@ -4791,9 +4558,10 @@ struct ThreadDetail {
   }
 
   @Builder
-  RichTextContent(fragments: ContentFragment[], fallbackText: string, fontSize: number, fontColor: ResourceColor, lineHeightVal: number, regionKey: string) {
+  RichTextContent(fragments: ContentFragment[], fallbackText: string, fontSize: number, fontColor: ResourceColor, lineHeightVal: number, regionKey: string,
+    previewAuthor: string = '') {
     Column() {
-      if (fragments && fragments.length > 0) {
+      if (fragments.length > 0 || previewAuthor.length > 0) {
         // 启动 EmojiLoader HTTP 预取（带 Referer/UA 防盗链头，下载字节→PixelMap），完成后 readyEmojiUrls 触发重绘
         ForEach(this.uniqueEmojiUrls(fragments), (emojiUrl: string) => {
           Blank()
@@ -4809,6 +4577,13 @@ struct ThreadDetail {
         // → 选中态随节点销毁清除。纪元未变时 key 相同、节点复用，零额外开销。
         ForEach([this.copyEpochOf(regionKey)], (copyEpoch: number) => {
           Text() {
+            if (previewAuthor.length > 0) {
+              Span(previewAuthor + '：')
+                .fontColor(this.isDark ? '#A2BBDD' : '#405C7F')
+              if (fragments.length === 0) {
+                Span(fallbackText)
+              }
+            }
             ForEach(fragments, (fragment: ContentFragment, idx: number) => {
               if (fragment.type === ContentFragmentType.EMOJI) {
                 if ((fragment.imageUrl && fragment.imageUrl.length > 0) && this.hasReadyEmoji(fragment.imageUrl) && EmojiLoader.has(fragment.imageUrl)) {
@@ -4837,8 +4612,10 @@ struct ThreadDetail {
                     .fontColor(fontColor)
                 }
               } else if (fragment.type === ContentFragmentType.IMAGE) {
-                // Skip IMAGE fragments here — they are rendered separately by ImageGrid
-              } else if (fragment.type === ContentFragmentType.LINK) {
+                if (previewAuthor.length > 0) {
+                  Span('[图片]')
+                }
+              } else if (fragment.type === ContentFragmentType.LINK && previewAuthor.length === 0) {
                 // 可点击超链接：主题色高亮 + 下划线，点击弹"是否跳转链接"确认卡片
                 Span(fragment.text)
                   .fontSize(fontSize)
@@ -4852,7 +4629,7 @@ struct ThreadDetail {
                     this.openPendingLink((fragment.link !== undefined && fragment.link.length > 0) ? fragment.link : fragment.text);
                   })
               } else {
-                Span(fragment.text)
+                Span(idx === 0 && regionKey !== 'main' ? fragment.text.replace(/^(?:[ \t]*\r?\n)+/, '') : fragment.text)
                   .fontSize(fontSize)
                   .fontColor(fontColor)
               }
@@ -4869,14 +4646,14 @@ struct ThreadDetail {
           // 长按选中复制（docs/帖子详细页长按复制文字功能补全.md 方案 A）：
           // LocalDevice 允许跨应用粘贴；draggable(false) 关闭选中拖拽防与滚动抢手势；
           // 选中色按系统默认；onCopy 弹「复制成功」并自增纪元清除选中态
-          .copyOption(CopyOptions.LocalDevice)
+          .copyOption(previewAuthor.length > 0 ? CopyOptions.None : CopyOptions.LocalDevice)
           .draggable(false)
           .onCopy(() => { this.onTextCopied(regionKey); })
         }, (copyEpoch: number) => `${regionKey}_${copyEpoch}`)
       } else {
         // 与 Span 分支同款纪元重建：复制完成后清选中态
         ForEach([this.copyEpochOf(regionKey)], (copyEpoch: number) => {
-          Text(fallbackText)
+          Text(regionKey === 'main' ? fallbackText : fallbackText.replace(/^(?:[ \t]*\r?\n)+/, ''))
             .fontSize(fontSize)
             .fontColor(fontColor)
             .lineHeight(lineHeightVal)
@@ -5264,7 +5041,7 @@ struct ThreadDetail {
       .backgroundColor(Theme.sheetBg(this.isDark))
       .shadow(Theme.glassShadowStyle()).backgroundEffect(ImmBlur.control())
       .systemMaterial(ImmMaterial.control())
-      .borderRadius(32)
+      .borderRadius(32 * this.cardRadiusScale)
       .border({ width: { top: 1.5 }, color: Theme.sheetTopGlow(this.isDark) })
       .shadow({ radius: 48, color: '#3D000000', offsetY: 18 })
       // 弹出动画与项目其它居中确认卡一致：缩放 + 上移 + 淡入
@@ -5281,149 +5058,81 @@ struct ThreadDetail {
   }
 
 
-  /** 底部评论输入条外壳：inIsland=true（官方悬浮岛路径）外壳透明，胶囊与官方材质由悬浮条本体承担；
-   *  inIsland=false（旧叠放路径）保留整条玻璃大胶囊兜底。内部内容两路径共用 CommentBarBody。 */
   @Builder
   CommentBar(inIsland: boolean) {
-    if (inIsland) {
-      Row({ space: 8 }) {
-        this.CommentBarBody()
-      }
-      // 岛内内容宽度（2026-09-13 回退）：曾改为 `dockPillWidth() − 16` 试图解决平板裁切，但 `dockPillWidth()`
-      // 在手机档 = 296 → 减 16 后手机底栏内容宽从「全屏 100%」变成 280，**破坏了手机零回归**（用户已驳回，回退）。
-      .width('100%')
-      // 岛内高度跟随岛总高（单点 dockPillHeight：大折叠 62 / 平板手机 66），避免双 66 漂移
-      .height(this.dockPillHeight())
-      // 底栏内部居中（2026-09-13）：点赞 / 收藏 / 发送钮固定宽，「跳转」胶囊 layoutWeight(1)
-      // 撑满剩余 → 内容填满岛宽；显式声明居中对齐作为意图表达。
-      .justifyContent(FlexAlign.Center)
-      .alignItems(VerticalAlign.Center)
-      // 垂直居中补偿（2026-09-13 二次确认·两端统一）：官方悬浮岛的系统留白**上多下少**（与形态无关，
-      // 同一系统组件），无补偿时内容整体偏上 —— 平板档曾按「仅平板移除补偿」归零，真机随即复现
-      // 「点赞 / 收藏 / 跳转 / 发送整体偏上、看似不齐」（各元素高 42/46/42，偏移量随高度略异）。
-      // 故补偿恢复**两端统一** bottom 8（内容区上移 4vp 贴合官方岛视觉中心）；手机档本就是 8，零变化。
-      // 大折叠（2026-09-15 真机反馈横竖屏均「上面留空多于下面」）：官方岛留白差在该形态更大，
-      // 补偿加大到 16（再上移 4vp）拉平上下留空；同日随后岛高收 4（66→62），补偿同步 16→12
-      // 使内容区 62−12=50 与改前 66−16=50 完全一致（元素相对位置零变化，仅岛更紧凑）；
-      // 手机 / 平板维持 8 不变。微调点唯一（此常量）。
-      .padding({ left: 0, right: 0, top: 0, bottom: isLargeFoldDevice() ? 12 : 8 })
-    } else {
-      Row({ space: 8 }) {
-        this.CommentBarBody()
-      }
-      // 底栏不拉伸（2026-09-13）：原 `calc(100% - 64vp)` 在平板下同样会被拉成通栏，
-      // 改固定宽（手机基线 296，与官方悬浮岛同宽）；父 `BottomDock` 的 Column 是
-      // `align(Alignment.Bottom)` → 固定宽子项天然水平居中。
-      .width(this.dockPillWidth())
-      .height(66)
-      .padding({ left: 6, right: 6, top: 4, bottom: 4 })
-      // 外层整体玻璃胶囊：真磨砂（Regular）+ 极淡底/描边/轻影，点赞/收藏直接放在上面，不再套“框中框”。
-      .backgroundColor(Theme.segGlass(this.isDark, false))
-      .border({ width: 0.5, color: Theme.manualGlassBorder() })
-      .backgroundBlurStyle(BlurStyle.Regular, { scale: 0.85 })
-      .shadow(Theme.segGlassShadow(this.isDark, false))
-      .borderRadius(33)
-      .margin({ bottom: 30 })
-    }
-  }
-
-  /**
-   * 岛内跳转胶囊 / 发送钮垂直微调（vp）：仅大折叠生效，平板 / 手机 / 其它形态恒 0 逐像素不变。
-   * 历史：66 岛时代两元素偏上 → 拨 +4；岛高收 62（2026-09-15）后官方系统留白同步收、
-   * 两元素转为偏下 → 拨正量归 0 回归纯公式居中。微调点唯一（此常量），观感偏差变化时只调该值。
-   */
-  private islandNudge(): number {
-    // 当前 = 0（62 岛下两元素纯公式即居中）；如真机再报偏差，按方向改此值（偏上为正、偏下为负）
-    return 0;
-  }
-
-  /** 评论条内容（点赞/收藏 + 输入区 + 发送钮）：由 CommentBar 的两种外壳共用 */
-  @Builder
-  CommentBarBody() {
-    // 点赞按钮（含计数）：直接放在底栏大胶囊背景上，不再套独立小玻璃框
-    Row({ space: 3 }) {
-      SymbolGlyph($r('sys.symbol.hand_thumbsup'))
-        .fontSize(fs(22, this.fontScale))
-        .fontColor([this.liked ? $r('sys.color.icon_emphasize') : $r('sys.color.icon_secondary')])
-        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-        .hitTestBehavior(HitTestMode.Transparent)
-      Text(`${this.detail?.likeCount ?? 0}`)
-        .fontSize(fs(12, this.fontScale))
-        .fontColor(this.liked ? $r('sys.color.icon_emphasize') : $r('sys.color.font_secondary'))
-        .fontWeight(FontWeight.Medium)
-        .maxLines(1)
-        .constraintSize({ minWidth: 18 })
-        .hitTestBehavior(HitTestMode.Transparent)
-    }
-    .height(42)
-    .padding({ left: 8, right: 6 })
-    .alignItems(VerticalAlign.Center)
-    .onClick(() => { this.toggleLike(); })
-
-    // 收藏按钮：同样去掉独立小玻璃框。
-    // 短按 = 收藏 / 取消收藏（行为不变）；长按 350ms = 弹分类面板「收藏并归类」（方案 A：下滑/点遮罩关闭零副作用）。
-    // 长按与点击同挂一个组件时，长按识别成功后点击事件不再触发（与收藏页收纳夹长按置顶同机制），故短按不会被长按入口抢走。
-    Row() {
-      SymbolGlyph($r('sys.symbol.bookmark'))
-        .fontSize(fs(22, this.fontScale))
-        .fontColor([this.collected ? $r('sys.color.icon_emphasize') : $r('sys.color.icon_secondary')])
-        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-        .hitTestBehavior(HitTestMode.Transparent)
-    }
-    .height(42)
-    .padding({ left: 6, right: 6 })
-    .alignItems(VerticalAlign.Center)
-    .accessibilityText(this.collected ? '取消收藏，长按收藏并归类' : '收藏，长按收藏并归类')
-    .onClick(() => { this.collected = !this.collected; this.persistPersonalState(CACHE_KEY.PERSONAL_COLLECTED, this.collected); })
-    .gesture(LongPressGesture({ fingers: 1, repeat: false, duration: 350 })
-      .onAction(() => { this.openCategoryPicker(); }))
-
-    // 回复框改为跳转入口：本客户端不提供发回帖能力（第三方协议有封号风险），
-    // 点击后弹确认框并跳转官方贴吧对应帖子。外观沿用原输入胶囊（玻璃底 + 真磨砂 + 全圆胶囊）。
-    Row({ space: 10 }) {
+    Row({ space: 4 }) {
       Row() {
-        Text('跳转到官方贴吧')
-          .fontSize(fs(14, this.fontScale))
-          .fontColor($r('sys.color.font_secondary'))
+        Text('发贴千百度 文明第一步')
+          .fontSize(fs(13, this.fontScale))
+          .fontColor(Theme.textSecondary(this.isDark))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-        SymbolGlyph($r('sys.symbol.chevron_right'))
-          .fontSize(fs(16, this.fontScale))
-          .fontColor([$r('sys.color.icon_secondary')])
-          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-          .hitTestBehavior(HitTestMode.Transparent)
       }
       .layoutWeight(1)
-      .height(46)
-      .padding({ left: 16, right: 12 })
-      .backgroundColor(Theme.manualGlass(this.isDark))
-      .border({ width: 0.5, color: Theme.manualGlassBorder() })
-      .backgroundBlurStyle(BlurStyle.Thin, { scale: 0.9 })
-      .borderRadius(33)
-      .alignItems(VerticalAlign.Center)
-      .offset({ y: this.islandNudge() })
-      .accessibilityText('跳转到官方贴吧')
-      .onClick(() => { this.openJumpDialog(); })
+      .height(34)
+      .padding({ left: 10, right: 8 })
+      .id('thread_reply_entry')
+      .accessibilityText('回复帖子')
+      .enabled(!this.sending && this.detail !== null)
+      .onClick(() => { this.openReplyEditor(); })
 
-      // 发送按钮保留（维持底栏视觉平衡）：同样触发跳转官方贴吧
-      Button() {
-        SymbolGlyph($r('sys.symbol.paperplane'))
-          .fontSize(fs(20, this.fontScale))
-          .fontColor([$r('sys.color.font_on_primary')])
-          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      Column({ space: 1 }) {
+        SymbolGlyph($r('sys.symbol.ellipsis_message_1'))
+          .fontSize(20)
+          .fontColor([$r('sys.color.icon_primary')])
+        Text(this.formatEngagementCount(this.detail?.replyNum ?? 0))
+          .fontSize(fs(10, this.fontScale))
+          .fontColor(Theme.textSecondary(this.isDark))
       }
-      .width(42)
-      .height(42)
-      .margin({ right: 4 })
-      .offset({ y: this.islandNudge() })
-      .backgroundColor(Theme.glassAccent())
-      .shadow({ radius: 10, color: this.isDark ? '#733173FF' : '#403173FF', offsetY: 2 })
-      .borderRadius(Radius.full)
-      .accessibilityText('跳转到官方贴吧')
-      .onClick(() => { this.openJumpDialog(); })
+      .width(39)
+      .height(40)
+      .justifyContent(FlexAlign.Center)
+      .id('thread_reply_jump')
+      .accessibilityText('查看全部回复')
+      .onClick(() => { this.scrollToReplies(); })
+
+      Column({ space: 1 }) {
+        SymbolGlyph($r('sys.symbol.hand_thumbsup'))
+          .fontSize(20)
+          .fontColor([this.liked ? Theme.brand() : $r('sys.color.icon_primary')])
+        Text(this.formatEngagementCount(this.detail?.likeCount ?? 0))
+          .fontSize(fs(10, this.fontScale))
+          .fontColor(this.liked ? Theme.brand() : Theme.textSecondary(this.isDark))
+      }
+      .width(39)
+      .height(40)
+      .justifyContent(FlexAlign.Center)
+      .id('thread_like')
+      .accessibilityText(this.liked ? '取消点赞' : '点赞')
+      .onClick(() => { this.toggleLike(); })
+
+      Column() {
+        SymbolGlyph($r('sys.symbol.star'))
+          .fontSize(20)
+          .fontColor([this.collected ? Theme.brand() : $r('sys.color.icon_primary')])
+      }
+      .width(39)
+      .height(40)
+      .justifyContent(FlexAlign.Center)
+      .id('thread_collect')
+      .accessibilityText(this.collected ? '取消收藏，长按收藏并归类' : '收藏，长按收藏并归类')
+      .onClick(() => {
+        this.collected = !this.collected;
+        this.persistPersonalState(CACHE_KEY.PERSONAL_COLLECTED, this.collected);
+      })
+      .gesture(LongPressGesture({ fingers: 1, repeat: false, duration: 350 })
+        .onAction(() => { this.openCategoryPicker(); }))
     }
-    .layoutWeight(1)
+    .width(this.floatingPageBars && !inIsland ? this.dockPillWidth() : '100%')
+    .height(this.floatingPageBars ? this.dockPillHeight() : THREAD_DETAIL_FIXED_BAR_HEIGHT)
+    .padding({ left: inIsland ? 1 : 12, right: inIsland ? 1 : 8, bottom: inIsland ? (this.isWideFormDevice ? 8 : 2) : 0 })
     .alignItems(VerticalAlign.Center)
+    .backgroundColor(this.floatingPageBars
+      ? (inIsland ? Color.Transparent : Theme.segGlass(this.isDark, false))
+      : Theme.bgCard(this.isDark))
+    .backgroundBlurStyle(this.floatingPageBars && !inIsland ? BlurStyle.Regular : BlurStyle.NONE)
+    .border({ width: this.floatingPageBars && !inIsland ? 0.5 : 0, color: Theme.manualGlassBorder() })
+    .borderRadius(this.floatingPageBars ? Radius.full : 0)
+    .margin({ bottom: this.floatingPageBars && !inIsland ? this.dockBottomMargin() : 0 })
   }
 }

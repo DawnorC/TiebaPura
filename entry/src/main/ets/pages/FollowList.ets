@@ -17,7 +17,11 @@
  */
 
 import { LengthMetrics } from '@kit.ArkUI';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop, overlayCardWidth } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop,
+  overlayCardWidth,
+  DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { ToastUtil, ToastType } from '../common/ToastUtil';
 import { Haptic } from '../common/Haptic';
 import { TiebaService } from '../service/TiebaService';
@@ -30,6 +34,8 @@ import { compareByName } from '../common/Pinyin';
 import { EmptyView, ErrorView } from '../components/CommonComponents';
 import { ListRowSkeleton } from '../components/Skeleton';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 /** 关注列表视图模式：全部关注 / 互相关注（粉丝接口 has_concerned=1 过滤的独立列表） */
 enum FollowListMode {
   All = 0,
@@ -74,6 +80,8 @@ const FOLLOW_TITLE_BAR_HEIGHT: number = 98;
 @Entry
 @Component
 struct FollowList {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
   @State isDark: boolean = isDarkMode();
   @State list: FollowUserItem[] = [];
   @State mutualList: FollowUserItem[] = []; // 互相关注列表（粉丝接口 has_concerned=1 过滤，切「互相关注」展示）
@@ -583,8 +591,8 @@ struct FollowList {
         .width('100%')
         .clip(false)
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-        .overlay(this.BottomFadeOverlay())
-        .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+        .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+        .overlay(() => { TopGlassVeil() })
         }
       } else {
         Column() {
@@ -632,7 +640,6 @@ struct FollowList {
         .hitTestBehavior(HitTestMode.None)
         .bindMenu(this.showSortMenu, this.SortMenuContent(), {
           placement: Placement.BottomRight,
-          targetSpace: LengthMetrics.vp(0),
           systemMaterial: ImmMaterial.menu(),
           onDisappear: () => { this.showSortMenu = false; }
         })
@@ -682,20 +689,6 @@ struct FollowList {
     .width('100%')
     .height(48)
     .justifyContent(FlexAlign.Center)
-  }
-
-  /** 渐变沉浸遮罩：顶部渐显（同 ThreadList/Index/ThreadDetail BottomFadeOverlay 范式） */
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', tabletTopFadeStop(98)], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
   }
 
   // ===== 悬浮沉浸顶栏（渐变遮罩 + 磨砂玻璃按钮，同 ThreadDetail 范式）=====
@@ -1000,7 +993,7 @@ struct FollowList {
     .width('100%')
     .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.md, bottom: Spacing.md })
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(Radius.lg)
+    .borderRadius(Radius.lg * this.cardRadiusScale)
     .accessibilityText(item.name || item.userId || '未知用户')
     .accessibilityDescription(this.editMode ? '点击切换勾选' : '点击进入用户主页')
     .onClick(() => {
@@ -1096,7 +1089,7 @@ struct FollowList {
     }
     .width(210)
     .padding({ left: 16, right: 16, top: 13, bottom: 13 })
-    .borderRadius(Radius.md)
+    .borderRadius(Radius.md * this.cardRadiusScale)
     .onClick(() => { this.applySortMode(mode); })
   }
 
@@ -1173,7 +1166,7 @@ struct FollowList {
       .backgroundColor(Theme.sheetBg(this.isDark))
       .shadow(Theme.glassShadowStyle()).backgroundEffect(ImmBlur.control())
       .systemMaterial(ImmMaterial.control())
-      .borderRadius(32)
+      .borderRadius(32 * this.cardRadiusScale)
       .border({ width: { top: 1.5 }, color: Theme.sheetTopGlow(this.isDark) })
       .shadow({ radius: 48, color: '#3D000000', offsetY: 18 })
       .transition(TransitionEffect.scale({ x: 0.92, y: 0.92 }).combine(TransitionEffect.translate({ y: 24 })).combine(TransitionEffect.opacity(0)).animation({ duration: 220, curve: Curve.EaseOut }))

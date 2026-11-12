@@ -17,11 +17,20 @@
  */
 
 import { FontSizeManager } from '../service/FontSizeManager';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, tabletTopFadeStop } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, tabletTopFadeStop,
+  DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 @Entry
 @Component
 struct FontSizePage {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  /** 页面边距（左右留白，实时同步；16=默认，0=贴边） */
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   @StorageLink('fontScale') @Watch('onFontScaleChange') fontScale: number = 1.0;
   @StorageLink('fontLevel') fontLevel: number = 2;
   @State isDark: boolean = isDarkMode();
@@ -97,7 +106,7 @@ struct FontSizePage {
             .width('85%')
             .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.lg, bottom: Spacing.lg })
             .backgroundColor(Theme.brand())
-            .borderRadius(Radius.lg)
+            .borderRadius(Radius.lg * this.cardRadiusScale)
             .margin({ top: Spacing.md, bottom: Spacing.xl * 2 })
 
             // 说明文字
@@ -151,11 +160,11 @@ struct FontSizePage {
             .padding(Spacing.lg)
             .backgroundColor(Theme.bgCard(this.isDark))
             .border({ width: 0.5, color: Theme.divider(this.isDark) })
-            .borderRadius(Radius.lg)
+            .borderRadius(Radius.lg * this.cardRadiusScale)
             .margin({ top: Spacing.xl, bottom: Spacing.xl })
           }
           .width('100%')
-          .padding({ left: Spacing.lg, right: Spacing.lg, bottom: Spacing.xl * 4 })
+          .padding({ left: this.pageMargin, right: this.pageMargin, bottom: Spacing.xl * 4 })
         }
         .scrollBar(BarState.Off)
         .scrollable(ScrollDirection.Vertical)
@@ -165,8 +174,8 @@ struct FontSizePage {
         .clip(false)
         .align(Alignment.TopStart)
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP])
-        .overlay(this.BottomFadeOverlay())
-        .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+        .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+        .overlay(() => { TopGlassVeil() })
         // 左右滑动手势切换档位：priorityGesture 优先于 Scroll 自带滚动识别，否则 PanGesture 竞争不过 Scroll 的触摸处理
         // 手势必须内联在 build() 中（经方法返回的实例每次 build 重建会导致手势失效）
         // 方向：向右滑减小、向左滑增大；圆点 Row 仍跟随手指平移（translate 绑定 panOffsetX）
@@ -318,19 +327,5 @@ struct FontSizePage {
     .padding({ left: Spacing.lg, right: Spacing.lg, top: 44, bottom: 10 })
     .backgroundColor(Color.Transparent)
     .zIndex(14)
-  }
-
-  /** 渐变沉浸遮罩：顶部渐显（同 Settings.ets / Index「我的」范式） */
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', tabletTopFadeStop(98)], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
   }
 }

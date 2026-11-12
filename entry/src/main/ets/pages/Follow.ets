@@ -21,9 +21,14 @@ import { AuthManager } from '../service/AuthManager';
 import { CacheManager } from '../cache/CacheManager';
 import { CACHE_KEY, CACHE_TTL } from '../common/Constants';
 import { FollowItem } from '../model/DataModel';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop,
+  DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { LoadingView, EmptyView, ErrorView } from '../components/CommonComponents';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 enum LoadState {
   Loading, Success, Empty, Error,
 }
@@ -31,6 +36,8 @@ enum LoadState {
 @Entry
 @Component
 struct Follow {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
   @State follows: FollowItem[] = [];
   @State loadState: LoadState = LoadState.Loading;
   @State errorMsg: string = '';
@@ -141,7 +148,7 @@ struct Follow {
               .width('100%')
               .padding(Spacing.lg)
               .backgroundColor(Theme.bgCard(this.isDark))
-              .borderRadius(Radius.lg)
+              .borderRadius(Radius.lg * this.cardRadiusScale)
               .onClick(() => this.openForum(f))
             }
           }, (f: FollowItem) => f.forumName)
@@ -152,8 +159,8 @@ struct Follow {
         .scrollBar(BarState.Off)
         .clip(false)
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-        .overlay(this.BottomFadeOverlay())
-        .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+        .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+        .overlay(() => { TopGlassVeil() })
       }
 
       // 悬浮顶栏（内容可穿过）
@@ -181,18 +188,5 @@ struct Follow {
     .height('100%')
     .backgroundColor(Theme.bg(this.isDark))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-  }
-
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', tabletTopFadeStop(98)], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
   }
 }

@@ -31,7 +31,12 @@
 import { curves } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { display } from '@kit.ArkUI';
-import { Theme, Radius, Breakpoint, fs, isDarkMode, ImmMaterial, MaterialManager, isWideBarDevice, isLargeFoldDevice, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns, isLargeScreenForm, isWideBarFullscreen } from '../common/Theme';
+import {
+  Theme, Radius, Breakpoint, fs, isDarkMode, ImmMaterial, MaterialManager, isWideBarDevice,
+  isLargeFoldDevice, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns,
+  isLargeScreenForm, isWideBarFullscreen,
+  DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { PrefetchGate } from '../common/PrefetchGate';
 import { PerfTrace } from '../common/PerfTrace';
 import { TiebaService } from '../service/TiebaService';
@@ -41,6 +46,8 @@ import {
 } from '../model/DataModel';
 import { LoadingView, EmptyView, ErrorView } from '../components/CommonComponents';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 const MODULE_LABELS: string[] = ['搜吧', '搜贴', '搜人'];
 // 顶部悬浮栏整体高度（状态栏留位 + 搜索行），首屏内容让位基准（三段胶囊已下移为底部模块栏，原 154 - 胶囊行 40）
 const HEADER_TOP_SPACE: number = 114;
@@ -62,6 +69,8 @@ const AVATAR_COLORS: string[] = ['#3173FF', '#8A5CF6', '#2CB883', '#F0576B', '#F
 @Entry
 @Component
 struct GlobalQueryPage {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
   @StorageLink('fontScale') fontScale: number = 1.0;
   @State fontSizeTick: number = 0;
   // 「列数调整」档位广播（2026-09-18，个性化 → 列数调整）：@Watch 回写本地档位 → 列数函数按新档返回并强制回到列表顶部
@@ -165,6 +174,15 @@ struct GlobalQueryPage {
     // 首帧形态初值（§4.6 H-A / §4.8 T-B 同源）：onAreaChange 只在尺寸变化后触发，冷启动平板横屏
     // 若不预置会出现「先 1 列再跳 3/4 列」的首帧跳变。取不到就保持 0，由 onAreaChange 兜底。
     this.refreshFormMetrics();
+    // 进入搜索页即进入待输入状态：首帧后请求聚焦搜索框，自动弹出输入法
+    // （官方标题槽与悬浮浮层两种输入框共用同一 key，仅当前分支在树上）
+    setTimeout(() => {
+      try {
+        this.getUIContext().getFocusController().requestFocus('searchInputKey');
+      } catch (e) {
+        // 忽略：极端情况下窗口/焦点控制器未就绪
+      }
+    }, 350);
   }
 
   /** 形态度量回填：aboutToAppear 首帧（display 兜底猜测）+ 根容器 onAreaChange（窗口实值）共用。
@@ -830,7 +848,7 @@ struct GlobalQueryPage {
     .width('100%')
     .padding({ left: 14, right: 12, top: 12, bottom: 12 })
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .onClick(onClick)
   }
 
@@ -979,7 +997,7 @@ struct GlobalQueryPage {
     .padding(14)
     .backgroundColor(Theme.bgCard(this.isDark))
     // 推荐位卡片圆角 26：与全站卡片口径统一（此前 18）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .border({ width: 1, color: Theme.manualGlassBorder() })
     .onClick(() => {
       if (this.forumData.exact !== null) {
@@ -1027,7 +1045,7 @@ struct GlobalQueryPage {
     .width('100%')
     .padding(14)
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .onClick(() => this.openForum(item))
   }
 
@@ -1115,7 +1133,7 @@ struct GlobalQueryPage {
     .alignItems(HorizontalAlign.Start)
     .padding(14)
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .onClick(() => this.openThread(item))
   }
 
@@ -1212,7 +1230,7 @@ struct GlobalQueryPage {
     .padding(14)
     .backgroundColor(Theme.bgCard(this.isDark))
     // 推荐位卡片圆角 26：与全站卡片口径统一（此前 18）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .border({ width: 1, color: Theme.manualGlassBorder() })
     .onClick(() => {
       if (this.userData.exact !== null) {
@@ -1253,7 +1271,7 @@ struct GlobalQueryPage {
     .width('100%')
     .padding({ left: 14, right: 12, top: 12, bottom: 12 })
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .onClick(() => this.openUser(item))
   }
 
@@ -1278,28 +1296,6 @@ struct GlobalQueryPage {
     .width('100%')
     .justifyContent(FlexAlign.Center)
     .padding({ top: 14, bottom: 14 })
-  }
-
-  /* ============== 顶部满宽渐显带 ============== */
-
-  @Builder
-  TopFadeOverlay() {
-    // 顶部渐显：只覆盖悬浮搜索行区域（下沿 = HEADER_TOP_SPACE，即搜索框底部），
-    // 内容滚过搜索行下缘后即完全清晰，不再被渐隐带往下盖住；
-    // 丢帧治理 P2（2026-09-26）：原 DST_IN 蒙版要求内容层整体 blendMode(OFFSCREEN)，滚动时
-    // 每帧全屏离屏合成；改为「页面底色 → 透明」渐变条直接盖在内容上，视觉近似且零离屏。
-    // 回退 = 恢复 alpha 形态 colors + .blendMode(DST_IN, OFFSCREEN) + 内容层 SRC_OVER OFFSCREEN。
-    Stack()
-      .width('100%')
-      .height(HEADER_TOP_SPACE)
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [
-          [Theme.bg(this.isDark), 0.0],
-          [this.isDark ? '#00101114' : '#00F2F4F7', 0.7]
-        ]
-      })
-      .hitTestBehavior(HitTestMode.None)
   }
 
   /* ============== 底部悬浮模块栏（与首页底栏同款：icon22+文字11、等分、选中仅加粗+强调色，无缩放） ============== */
@@ -1389,6 +1385,8 @@ struct GlobalQueryPage {
           })
             .layoutWeight(1)
             .height(40)
+            .key('searchInputKey')
+            .defaultFocus(true)
             .fontSize(fs(15, this.fontScale))
             .fontColor(Theme.textPrimary(this.isDark))
             .placeholderColor(Theme.textTertiary(this.isDark))
@@ -1499,6 +1497,8 @@ struct GlobalQueryPage {
           })
             .layoutWeight(1)
             .height(40)
+            .key('searchInputKey')
+            .defaultFocus(true)
             .fontSize(fs(15, this.fontScale))
             .fontColor($r('sys.color.font_primary'))
             .placeholderColor($r('sys.color.font_secondary'))
@@ -1739,7 +1739,8 @@ struct GlobalQueryPage {
     .align(Alignment.TopStart)
     .onReachEnd(() => this.loadMoreCurrent(false))
     .onScroll((xOffset: number, yOffset: number) => this.onContentScroll(xOffset, yOffset))
-    .overlay(this.TopFadeOverlay())
+    .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+    .overlay(() => { TopGlassVeil() })
   }
 
   /** 手写兜底底栏（materialSupported=false 时）：真模糊磨砂 + 半透明白底 + 白描边 + 投影

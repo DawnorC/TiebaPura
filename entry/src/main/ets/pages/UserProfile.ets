@@ -18,7 +18,12 @@
 
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { display } from '@kit.ArkUI';
-import { Theme, Spacing, Radius, Breakpoint, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, isWideBarDevice, isLargeFoldDevice, isPuraXMaxDevice, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns, isLargeScreenForm, isWideBarFullscreen } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, Breakpoint, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, isWideBarDevice,
+  isLargeFoldDevice, isPuraXMaxDevice, isWideFormDevice as detectWideFormDevice, readColumnMode,
+  overrideColumns, isLargeScreenForm, isWideBarFullscreen,
+  DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { ToastUtil, ToastType } from '../common/ToastUtil';
 import { Haptic } from '../common/Haptic';
 import { TiebaService, BlacklistPermOptions } from '../service/TiebaService';
@@ -32,6 +37,8 @@ import { ThreadListSkeleton } from '../components/Skeleton';
 import { common } from '@kit.AbilityKit';
 import { window, LengthMetrics, curves } from '@kit.ArkUI';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 enum ProfileLoadState {
   Loading = 0,
   Ready = 1,
@@ -93,6 +100,8 @@ interface AvoidAreaCompat {
 @Entry
 @Component
 struct UserProfile {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
   @State isDark: boolean = isDarkMode();
   @State profile: UserProfileModel | null = null;
   @State profileState: ProfileLoadState = ProfileLoadState.Loading;
@@ -1087,13 +1096,11 @@ struct UserProfile {
       .height('100%')
       .backgroundColor(Theme.bg(this.isDark))
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-
-      // 顶部满宽渐显带（参考收藏页 Favorite.TopFadeBand 真机终版方案）：
-      // Stack 顶层背景色渐变条（bg 不透明→透明线性），内容从顶栏下渐现、上滑时渐隐；
-      // 不用 overlay+blendMode（收藏页踩坑：离屏层宽度手机端解析异常）；
-      // zIndex 8 盖住列表内容，低于兜底 TopBar(10) / 底部分段胶囊(20) / 弹窗(100)；
-      // hitTestBehavior(None) 不挡交互。高度沿用收藏页拍板口径 132（顶栏 98 + 渐现尾段 34）。
-      this.TopFadeBand()
+      // 顶部真·渐变模糊（对齐「消息/我的」范式）：挂全高内容层，渐变带从 y=0 起覆盖
+      // 状态栏+标题区；资料头/帖子流经内层滚动 clip 边界即页缘（1069 的 clip 服务横滑切 Tab、
+      // 不阻断入顶带）上溢穿过顶栏下方时被渐进模糊（替代已删除的 TopFadeBand 假遮罩）。
+      .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+      .overlay(() => { TopGlassVeil() })
 
       // 悬浮沉浸顶栏（透明底，内容可穿过；复用 ThreadDetail 范式）；
       // 官方 title 槽位路径下整行已在槽位里（TopTitleBar），这里不再叠一层
@@ -1114,7 +1121,6 @@ struct UserProfile {
         .hitTestBehavior(HitTestMode.None)
         .bindMenu(this.showPostSortMenu, this.PostSortMenuContent(), {
           placement: Placement.BottomRight,
-          targetSpace: LengthMetrics.vp(0),
           systemMaterial: ImmMaterial.menu(),
           onDisappear: () => { this.showPostSortMenu = false; }
         })
@@ -1434,7 +1440,7 @@ struct UserProfile {
     .padding(Spacing.lg)
     .backgroundColor(Theme.bgCard(this.isDark))
     // 卡片圆角 26：与首页 ThreadCard、详情页卡片、其余列表页卡片统一（不借用全局 Radius.lg）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .accessibilityText(item.title)
     .onClick(() => {
       // 点击即预取：利用跳转动画窗口后台取详情，详情页打开即命中缓存秒开
@@ -1520,7 +1526,7 @@ struct UserProfile {
         Image(item.avatar)
           .width(48)
           .height(48)
-          .borderRadius(Radius.md)
+          .borderRadius(Radius.md * this.cardRadiusScale)
           .objectFit(ImageFit.Cover)
           .clip(true)
       } else {
@@ -1532,7 +1538,7 @@ struct UserProfile {
         }
         .width(48)
         .height(48)
-        .borderRadius(Radius.md)
+        .borderRadius(Radius.md * this.cardRadiusScale)
         .backgroundColor(Theme.brandBg(this.isDark))
         .alignContent(Alignment.Center)
       }
@@ -1568,7 +1574,7 @@ struct UserProfile {
     .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.md, bottom: Spacing.md })
     .backgroundColor(Theme.bgCard(this.isDark))
     // 卡片圆角 26：与帖子卡、首页 ThreadCard 统一（不借用全局 Radius.lg）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .accessibilityText(item.forumName)
     .onClick(() => {
       this.getUIContext().getRouter().pushUrl({
@@ -1580,32 +1586,6 @@ struct UserProfile {
   }
 
   // ===== 悬浮沉浸顶栏（兜底路径专用：开关关闭 / 低版本才挂载；官方槽位版本见 TopTitleBar）=====
-
-  /**
-   * 顶部满宽渐显带（参考收藏页 Favorite.TopFadeBand 真机三次修复终版，2026-09-14）：
-   * Stack 顶层满宽背景色渐变条——下层是纯页面背景色，背景色渐变条叠加 = 视觉等价渐隐，
-   * 宽度跟随 ProfileStack 全宽，不依赖列表宿主宽度（overlay+blendMode OFFSCREEN 方案在
-   * 手机端离屏层宽度解析异常，收藏页已弃用，勿回退）。
-   * 高 132 = 顶栏 98 + 渐现尾段 34（收藏页用户拍板口径）；hitTestBehavior(None) 不挡交互；
-   * zIndex 8：盖住双页内容，低于兜底 TopBar(10) / 底部分段胶囊(20) / 弹窗(100)，
-   * 官方 title 槽位在 Navigation title 层更高。
-   * 渐变从顶部即线性渐变、无全实段（[bg,0]→[透明bg,1]）：内容一进条顶就渐显，无硬切感。
-   */
-  @Builder
-  TopFadeBand() {
-    Column()
-      .width('100%')
-      .height(132)
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [
-          [Theme.bg(this.isDark), 0.0],
-          [this.isDark ? '#00101114' : '#00F2F4F7', 1.0]
-        ]
-      })
-      .hitTestBehavior(HitTestMode.None)
-      .zIndex(8)
-  }
 
   @Builder
   TopBar() {
@@ -1810,7 +1790,7 @@ struct UserProfile {
     }
     .width(180)
     .padding({ left: 16, right: 16, top: 13, bottom: 13 })
-    .borderRadius(Radius.md)
+    .borderRadius(Radius.md * this.cardRadiusScale)
     .onClick(() => { this.applyPostSort(mode); })
   }
 
@@ -1882,7 +1862,7 @@ struct UserProfile {
       .backgroundColor(Theme.sheetBg(this.isDark))
       .shadow(Theme.glassShadowStyle()).backgroundEffect(ImmBlur.control())
       .systemMaterial(ImmMaterial.control())
-      .borderRadius(32)
+      .borderRadius(32 * this.cardRadiusScale)
       .border({ width: { top: 1.5 }, color: Theme.sheetTopGlow(this.isDark) })
       .shadow({ radius: 48, color: '#3D000000', offsetY: 18 })
       .transition(TransitionEffect.scale({ x: 0.92, y: 0.92 }).combine(TransitionEffect.translate({ y: 24 })).combine(TransitionEffect.opacity(0)).animation({ duration: 220, curve: Curve.EaseOut }))
@@ -1995,7 +1975,7 @@ struct UserProfile {
       .backgroundColor(Theme.sheetBg(this.isDark))
       .shadow(Theme.glassShadowStyle()).backgroundEffect(ImmBlur.control())
       .systemMaterial(ImmMaterial.control())
-      .borderRadius(32)
+      .borderRadius(32 * this.cardRadiusScale)
       .border({ width: { top: 1.5 }, color: Theme.sheetTopGlow(this.isDark) })
       .shadow({ radius: 48, color: '#3D000000', offsetY: 18 })
       .transition(TransitionEffect.scale({ x: 0.92, y: 0.92 }).combine(TransitionEffect.translate({ y: 24 })).combine(TransitionEffect.opacity(0)).animation({ duration: 220, curve: Curve.EaseOut }))

@@ -22,6 +22,7 @@
 
 // 贴吧基础域名
 export const TIEBA_HOST: string = 'https://tieba.baidu.com';
+export const THREAD_COMMENT_PREVIEW_COUNT: number = 4;
 
 // API 端点接口
 export interface ApiEndpoints {
@@ -102,6 +103,7 @@ export interface CacheKeys {
   PERSONAL_COLLECTED: string;
   PERSONAL_LIKED: string;
   PERSONAL_COLLECTED_META: string;
+  RECENT_FORUM_VISIT: string;
   FONT_SIZE_LEVEL: string;
   FAVORITE_PIN_FOLDER: string;
   FAVORITE_PIN_THREAD: string;
@@ -122,10 +124,24 @@ export interface CacheKeys {
   FOLLOW_LIST_MODE: string;
   /** 进吧「我关注的吧」排序偏好（关注吧列表专用，与关注用户列表 FOLLOW_LIST_SORT 独立） */
   FOLLOW_FORUM_SORT: string;
+  /** 进吧「我关注的吧」显示模式（'0'=标准头像卡片 / '1'=紧凑仅吧名+等级） */
+  FOLLOW_FORUM_DISPLAY: string;
   /** 进吧「我关注的吧」置顶列表（forumName 数组，置顶恒顶） */
   PIN_FOLLOW_FORUM: string;
   /** 首页推荐仅显示关注吧的帖子开关 */
   HOME_ONLY_FOLLOW: string;
+  /** 全局页面边距（vp，0~24，0=无额外左右留白） */
+  PAGE_MARGIN: string;
+  FLOATING_PAGE_BARS: string;
+  BOTTOM_BAR_BACKDROP: string;
+  /** Dock 栏顺序（TabIndex 逗号串，如 '0,1,2,3,4'） */
+  DOCK_ORDER: string;
+  /** 启动默认显示界面（TabIndex 0~4，0=首页） */
+  DEFAULT_TAB: string;
+  /** 切页平移动画开关（'0'=关闭；缺省/其他=开启） */
+  TAB_ANIMATION: string;
+  /** Dock 隐藏项（TabIndex 逗号串，至少保留一项可见） */
+  DOCK_HIDDEN: string;
   /** 「帖子极速开启」开关（'1' = 开启；缺省/其他 = 关闭）：feed 首屏前 3 卡详情+图片预取 */
   THREAD_FEED_PREFETCH: string;
   /** 「仅 WiFi 启用」子开关（'0' = 关闭；缺省/其他 = 开启）：仅 WiFi 环境执行极速预取 */
@@ -177,6 +193,22 @@ export interface CacheKeys {
   FORUM_DEFAULT_SORT: string;
   /** 吧主页「最新」档子排序偏好：0 = 按回复时间 / 1 = 按发帖时间（缺省 1 = 现状零回归），全局档 */
   LATEST_SORT_MODE: string;
+  /** 「楼中楼回复字号」整体缩放比例（持久化；缺省 0.9，范围 0.7~1.2） */
+  SUB_REPLY_SCALE: string;
+  /** 顶栏渐变模糊·最终模糊半径（vp，缺省 26，范围 0~60） */
+  TOP_BAR_BLUR: string;
+  /** 顶栏渐变模糊·全模糊段结束位置（0~1 比例，缺省 0.10，须小于 FADE） */
+  TOP_BAR_SOLID: string;
+  /** 顶栏渐变模糊的渐退段结束位置，0 表示关闭。 */
+  TOP_BAR_FADE: string;
+  /** 「卡片圆角」整体缩放比例，范围 0~2。 */
+  CARD_RADIUS_SCALE: string;
+  /** 「最近进入」吧头像大小，范围 0~72 vp。 */
+  RECENT_AVATAR_SIZE: string;
+  /** 我的页个人统计快照（后接 userId 分键） */
+  MINE_USER_STATS: string;
+  /** 我的页关注用户总数快照（后接 userId 分键） */
+  MINE_FOLLOW_USER_COUNT: string;
 }
 
 // 缓存键
@@ -191,6 +223,7 @@ export const CACHE_KEY: CacheKeys = {
   PERSONAL_COLLECTED: 'tieba_personal_collected',
   PERSONAL_LIKED: 'tieba_personal_liked',
   PERSONAL_COLLECTED_META: 'tieba_personal_collected_meta',
+  RECENT_FORUM_VISIT: 'tieba_recent_forum_visit',
   FONT_SIZE_LEVEL: 'tieba_font_size_level',
   FAVORITE_PIN_FOLDER: 'favorite_pin_folder',
   FAVORITE_PIN_THREAD: 'favorite_pin_thread',
@@ -209,8 +242,16 @@ export const CACHE_KEY: CacheKeys = {
   FOLLOW_LIST_SORT: 'follow_list_sort',
   FOLLOW_LIST_MODE: 'follow_list_mode',
   FOLLOW_FORUM_SORT: 'follow_forum_sort',
+  FOLLOW_FORUM_DISPLAY: 'follow_forum_display',
   PIN_FOLLOW_FORUM: 'pin_follow_forum',
   HOME_ONLY_FOLLOW: 'tieba_home_only_follow',
+  PAGE_MARGIN: 'tieba_page_margin',
+  FLOATING_PAGE_BARS: 'tieba_floating_page_bars',
+  BOTTOM_BAR_BACKDROP: 'tieba_bottom_bar_backdrop',
+  DOCK_ORDER: 'tieba_dock_order',
+  DEFAULT_TAB: 'tieba_default_tab',
+  TAB_ANIMATION: 'tieba_tab_animation',
+  DOCK_HIDDEN: 'tieba_dock_hidden',
   THREAD_FEED_PREFETCH: 'tieba_thread_feed_prefetch',
   THREAD_FAST_WIFI: 'tieba_thread_fast_wifi',
   AUTO_ROTATE: 'tieba_auto_rotate',
@@ -227,6 +268,14 @@ export const CACHE_KEY: CacheKeys = {
   IMMERSIVE_READ_EXTRA: 'tieba_immersive_read_extra',
   FORUM_DEFAULT_SORT: 'tieba_forum_default_sort',
   LATEST_SORT_MODE: 'tieba_latest_sort_mode',
+  SUB_REPLY_SCALE: 'tieba_sub_reply_scale',
+  TOP_BAR_BLUR: 'tieba_top_bar_blur',
+  TOP_BAR_SOLID: 'tieba_top_bar_solid',
+  TOP_BAR_FADE: 'tieba_top_bar_fade',
+  CARD_RADIUS_SCALE: 'tieba_card_radius_scale',
+  RECENT_AVATAR_SIZE: 'tieba_recent_avatar_size',
+  MINE_USER_STATS: 'tieba_mine_user_stats',
+  MINE_FOLLOW_USER_COUNT: 'tieba_mine_follow_user_count',
 };
 
 // 缓存过期时间接口
@@ -239,6 +288,8 @@ export interface CacheTtls {
   USER_PROFILE: number;
   FOLLOW_FEED: number;
   FOLLOW_USERS: number;
+  MINE_USER_STATS: number;
+  MINE_FOLLOW_USER_COUNT: number;
 }
 
 // 缓存过期时间（毫秒）
@@ -251,6 +302,8 @@ export const CACHE_TTL: CacheTtls = {
   USER_PROFILE: 5 * 60 * 1000,       // 5 分钟：用户主页资料，秒开辅助 + 关注态刷新
   FOLLOW_FEED: 5 * 60 * 1000,        // 5 分钟：关注动态聚合快照，命中即秒开再后台刷新
   FOLLOW_USERS: 10 * 60 * 1000,      // 10 分钟：关注列表变化不频繁，过期可 stale 复用
+  MINE_USER_STATS: 30 * 60 * 1000,        // 30 分钟：我的页个人统计快照，stale 直出 + 后台刷新
+  MINE_FOLLOW_USER_COUNT: 30 * 60 * 1000, // 30 分钟：我的页关注用户总数快照
 };
 
 // 隐私政策（首启同意弹窗 + 应用市场「隐私政策网址」共用同一份在线政策）

@@ -85,6 +85,7 @@ export interface ThreadDetail {
   fragments?: ContentFragment[];
   replyNum: number;
   likeCount?: number;
+  shareCount?: number;
   isLiked?: boolean;
   isCollected?: boolean;
   createTime: string;
@@ -438,6 +439,10 @@ export interface ForumHeaderInfo {
   forumName: string;
   avatar: string;
   bannerUrl?: string;
+  headerImage?: string;
+  headerImageColor?: string;
+  headerColor?: string;
+  darkHeaderColor?: string;
   slogan: string;
   memberCount: number;
   threadCount: number;

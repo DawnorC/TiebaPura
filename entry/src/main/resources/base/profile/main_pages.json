@@ -17,8 +17,8 @@
     "pages/UserProfile",
     "pages/FollowList",
     "pages/GoodCategoryPage",
-    "pages/UsageHabitsPage",
-    "pages/AutoSignSettings",
-    "pages/SettingsMore"
+      "pages/AutoSignSettings",
+    "pages/SettingsMore",
+    "pages/LayoutSettingsPage"
   ]
 }

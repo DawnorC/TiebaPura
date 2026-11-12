@@ -28,6 +28,8 @@ import { Theme, Spacing, Radius, Breakpoint, CARD_COLUMNS_KEY, isDarkMode, ImmMa
 import { LoadingView, EmptyView, ErrorView, ThreadCard, ThreadItemData, ThreadSharePayload } from '../components/CommonComponents';
 import { ShareUtil } from '../common/ShareUtil';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 /**
  * 精选二级分类页（2026-09-21，十四轮改定：双常驻槽位角色轮换）：
  * 入口 = 吧主页 ThreadList 底部排序栏「精选」钮长按（350ms + Haptic.light），自下而上转场进入。
@@ -153,6 +155,7 @@ class GoodListDataSource implements IDataSource {
 @Entry
 @Component
 struct GoodCategoryPage {
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
   @StorageLink('fontScale') fontScale: number = 1.0;
   @State isDark: boolean = false;
   // ===== 路由参数 =====
@@ -968,8 +971,6 @@ struct GoodCategoryPage {
     Stack({ alignContent: Alignment.TopStart }) {
       // 内容层（双常驻槽位 + 状态覆盖层 + 左右滑手势）
       this.ContentLayer()
-      // 满宽渐显带（背景色→透明），滚动内容从其下穿过自然淡出
-      this.TopGradientScrim()
       // 分类胶囊行：官方材质（空 tabBar 壳槽位，文档 §6.13/6.14 同机制）/ 真模糊兜底
       if (this.materialSupported) {
         this.CategoryPillBarSlot()
@@ -1005,27 +1006,6 @@ struct GoodCategoryPage {
     .height('100%')
     .backgroundColor(Theme.bg(this.isDark))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-  }
-
-  /** 满宽渐显带：背景实色 → 透明（用户拍板，替代带阴影的栏） */
-  @Builder
-  TopGradientScrim() {
-    Column()
-      .width('100%')
-      .height(GOOD_SCRIM_HEIGHT)
-      .linearGradient({
-        angle: 180,
-        colors: [[this.scrimSolidColor(), 0.0], [this.scrimTransparentColor(), 1.0]]
-      })
-      .hitTestBehavior(HitTestMode.None)
-  }
-
-  private scrimSolidColor(): string {
-    return this.isDark ? '#101114' : '#F2F4F7';
-  }
-
-  private scrimTransparentColor(): string {
-    return this.isDark ? '#00101114' : '#00F2F4F7';
   }
 
   /** 分类胶囊行·官方沉浸光感版（空 tabBar 壳，文档 §6.13/6.14 同机制） */
@@ -1145,6 +1125,11 @@ struct GoodCategoryPage {
     }
     .width('100%')
     .height('100%')
+    // 顶部真·渐变模糊（对齐「消息/我的」范式）：挂全高内容层，渐变带从 y=0 起覆盖
+    // 状态栏+标题区；卡片经各槽位 Refresh clip(false) 上溢穿过胶囊行下方时被渐进模糊
+    // （替代已删除的 GradientBlurBar 纯色渐变条假遮罩）。
+    .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+    .overlay(() => { TopGlassVeil() })
     // 左右滑切换分类（HomeTab 推荐流同款）：必须挂在外层普通容器上——
     // 挂 Refresh 上 parallelGesture 不触发（十二轮真机结论）；与内部滚动并行识别
     .parallelGesture(

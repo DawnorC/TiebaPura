@@ -22,9 +22,16 @@ import { curves, display } from '@kit.ArkUI';
 import { AuthManager } from '../service/AuthManager';
 import { TiebaService } from '../service/TiebaService';
 import { NotifyMessage } from '../model/DataModel';
-import { Theme, Spacing, Radius, fs, isDarkMode, ImmMaterial, isWideBarDevice, isLargeFoldDevice, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns, isLargeScreenForm, isWideBarFullscreen } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, fs, isDarkMode, ImmMaterial, isWideBarDevice, isLargeFoldDevice,
+  isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns, isLargeScreenForm,
+  isWideBarFullscreen,
+  DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { LoadingView, EmptyView, ErrorView } from '../components/CommonComponents';
 import { formatTime } from '../common/Constants';
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 import {
   ImmersiveReadSensor, IMMERSIVE_EXTRA_FLY_SCALE, IMMERSIVE_EXTRA_HIDE_MS, IMMERSIVE_EXTRA_SHOW_MS,
   IMMERSIVE_EXTRA_SPRING_RESPONSE, IMMERSIVE_EXTRA_SPRING_DAMPING
@@ -84,6 +91,10 @@ const messagesCache: MessagesCenterCache = new MessagesCenterCache();
 
 @Component
 export struct MessagesTab {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  // 页面边距（左右留白，随设置页实时同步；16=默认，0=贴边）
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   /**
    * 顶部渐显带收窄（2026-09-13 用户反馈）：平板竖屏下原 15% 渐显覆盖到第一个卡片中部，
    * 要求「只覆盖顶部按钮与标题」→ 平板档覆盖高度 = 顶栏 98vp，手机维持原比例。
@@ -579,7 +590,7 @@ export struct MessagesTab {
         .onClick(() => { this.switchTab(NotifyTab.At); })
     }
     .width('100%')
-    .padding({ left: Spacing.lg, right: Spacing.lg, top: 48, bottom: 20 })
+    .padding({ left: this.pageMargin, right: this.pageMargin, top: 48, bottom: 20 })
     .backgroundColor(Color.Transparent)
     .zIndex(14)
     // 沉浸阅读补全（2026-09-29）：兜底路径顶栏整行上移 + 淡出 + 禁用命中
@@ -619,7 +630,7 @@ export struct MessagesTab {
         .onClick(() => { this.switchTab(NotifyTab.At); })
     }
     .width('100%')
-    .padding({ left: Spacing.lg, right: Spacing.lg, top: 48, bottom: 20 })
+    .padding({ left: this.pageMargin, right: this.pageMargin, top: 48, bottom: 20 })
     // 沉浸阅读补全（2026-09-29）：槽高固定 108 不参与内容布局（列表自带让位），整行上移 + 淡出
     .translate({ y: this.immersiveHidden ? this.notifyTopSink() : 0 })
     .opacity(this.immersiveHidden ? 0 : 1)
@@ -675,7 +686,7 @@ export struct MessagesTab {
             .padding({ left: 10, right: 10, top: 6, bottom: 6 })
             .backgroundColor(Theme.bgSurface(this.isDark))
             .border({ width: 0.5, color: Theme.divider(this.isDark) })
-            .borderRadius(Radius.md)
+            .borderRadius(Radius.md * this.cardRadiusScale)
         }
 
         if (item.forumName.length > 0) {
@@ -692,7 +703,7 @@ export struct MessagesTab {
     .padding(Spacing.lg)
     .backgroundColor(Theme.bgCard(this.isDark))
     // 卡片圆角 26：与首页 ThreadCard、详情页卡片、其余列表页卡片统一（不借用全局 Radius.lg）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .onClick(() => { this.openThread(item); })
   }
 
@@ -720,31 +731,6 @@ export struct MessagesTab {
     }
     .width(44)
     .height(44)
-  }
-
-  /** 顶部渐显覆盖比例（2026-09-13）：平板只覆盖顶部按钮与标题（98vp 折算），手机维持 15% */
-  private topFadeStop(): number {
-    if (!this.isWideFormDevice || this.fadeCoverVp <= 0) {
-      return 0.15;
-    }
-    return Math.min(0.15, 98 / this.fadeCoverVp);
-  }
-
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        // 丢帧治理 P2（2026-09-26）：原 DST_IN 蒙版要求内容层整体 blendMode(OFFSCREEN)，
-        // 滚动时每帧全屏离屏合成；改为「顶栏底色 → 透明」渐变条直接盖在内容上（视觉近似，零离屏）。
-        colors: [
-          [Theme.bg(this.isDark), 0.0],
-          [this.isDark ? '#00101114' : '#00F2F4F7', this.topFadeStop()]
-        ]
-      })
-      .hitTestBehavior(HitTestMode.None)
   }
 
   /** §4.4 消息多列「列均衡」阈值（vp，方案 B 滞回，与 §4.9 / 收藏页同款） */
@@ -884,7 +870,7 @@ export struct MessagesTab {
             .width('100%')
             // 修复"首卡上方大片空白"：内容不足一屏时 Scroll 会垂直居中 → 最小撑满视口贴顶（同单列口径）
             .constraintSize({ minHeight: '100%' })
-            .padding({ left: Spacing.lg, right: Spacing.lg, top: 0 })
+            .padding({ left: this.pageMargin, right: this.pageMargin, top: 0 })
             // 真机修复（2026-09-14）：平板 3/4 列把一页 20 条摊薄后内容可能填不满视口 → Scroll 无可滚
             // 距离、onReachEnd 一次都不触发。内容高 / 视口高记录进字段（供 loadMessages 完成后主动判断续拉；
             // minHeight 撑满下高度恒定、本回调未必再触发，故主动判断在 loadMessages 末尾兜底）
@@ -956,7 +942,7 @@ export struct MessagesTab {
             // 让内容列最小撑满视口即可贴顶显示，内容超出视口时不受影响。
             .constraintSize({ minHeight: '100%' })
             // 顶部让位：padding-top 计入内容、随滚动一起上移（沉浸），且不会被 Column space 再叠加一份
-            .padding({ left: Spacing.lg, right: Spacing.lg, top: 0 })
+            .padding({ left: this.pageMargin, right: this.pageMargin, top: 0 })
           }
           .width('100%')
           .height('100%')
@@ -1032,7 +1018,8 @@ export struct MessagesTab {
       this.pageHeight = h;
     })
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    .overlay(this.BottomFadeOverlay())
+    .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+    .overlay(() => { TopGlassVeil() })
   }
 
   build() {

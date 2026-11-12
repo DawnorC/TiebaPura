@@ -20,8 +20,13 @@ import { common, Want } from '@kit.AbilityKit';
 import { AuthManager } from '../service/AuthManager';
 import { TiebaService } from '../service/TiebaService';
 import { PRIVACY_POLICY_URL } from '../common/Constants';
-import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop,
+  DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 /** 官方标题栏开关（§6.10 模板）：true 且设备支持材质时，「返回 + 软件设置」搬进 Navigation title 槽位吃官方材质；
  *  false 或低版本自动回退到页面主体悬浮自绘玻璃 TopBar（原样保留）。 */
 const SETTINGS_OFFICIAL_TITLE_BAR: boolean = true;
@@ -32,6 +37,10 @@ const SETTINGS_TITLE_BAR_HEIGHT: number = 98;
 @Entry
 @Component
 struct Settings {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  /** 页面边距（左右留白，实时同步；16=默认，0=贴边） */
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   @State isDark: boolean = isDarkMode();
   @State userName: string = '';
   @State userAvatar: string = '';
@@ -129,13 +138,13 @@ struct Settings {
               .fontColor(Theme.danger())
               .fontWeight(FontWeight.Medium)
               .backgroundColor(Theme.bgCard(this.isDark))
-              .borderRadius(Radius.lg)
+              .borderRadius(Radius.lg * this.cardRadiusScale)
               .margin({ top: Spacing.lg })
               .onClick(() => this.handleLogout())
           }
         }
         .width('100%')
-        .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.md, bottom: Spacing.xl })
+        .padding({ left: this.pageMargin, right: this.pageMargin, top: Spacing.md, bottom: Spacing.xl })
       }
       .scrollBar(BarState.Off)
       .scrollable(ScrollDirection.Vertical)
@@ -145,8 +154,8 @@ struct Settings {
       .clip(false)
       .align(Alignment.TopStart)
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .overlay(this.BottomFadeOverlay())
-      .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+      .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+      .overlay(() => { TopGlassVeil() })
 
       // 悬浮沉浸顶栏（透明底，内容可穿过；同「我的」页 TopBar 范式）；
       // 官方 title 槽位路径下已在槽位里（SettingsTitleBar），不再叠一层
@@ -245,20 +254,6 @@ struct Settings {
     .padding({ left: Spacing.lg, right: Spacing.lg, top: 44, bottom: 10 })
   }
 
-  /** 渐变沉浸遮罩：顶部渐显（同 Index「我的」BottomFadeOverlay 范式，参数一致） */
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', tabletTopFadeStop(98)], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
-  }
-
   @Builder
   AccountCard() {
     Row({ space: Spacing.md }) {
@@ -307,7 +302,7 @@ struct Settings {
     .width('100%')
     .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.lg, bottom: Spacing.lg })
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(Radius.lg)
+    .borderRadius(Radius.lg * this.cardRadiusScale)
     .margin({ bottom: Spacing.lg })
     .onClick(() => {
       if (!this.loggedIn) {
@@ -328,16 +323,16 @@ struct Settings {
         () => { this.getUIContext().getRouter().pushUrl({ url: 'pages/ShieldSettings' }).catch(() => {}); }
       )
       this.SettingItem(
-        $r('sys.symbol.circle'),
+        $r('sys.symbol.moon_fill'),
         '个性化',
-        '文字大小、UI 界面',
+        '字体、深色模式与阅读体验',
         () => { this.getUIContext().getRouter().pushUrl({ url: 'pages/PersonalizedPage' }).catch(() => {}); }
       )
       this.SettingItem(
-        $r('sys.symbol.hand'),
-        '使用习惯',
-        '万般功能不如自己顺手',
-        () => { this.getUIContext().getRouter().pushUrl({ url: 'pages/UsageHabitsPage' }).catch(() => {}); }
+        $r('sys.symbol.grid'),
+        '界面布局',
+        '边距、列数、Dock 栏与默认界面',
+        () => { this.getUIContext().getRouter().pushUrl({ url: 'pages/LayoutSettingsPage' }).catch(() => {}); }
       )
       this.SettingItem(
         $r('sys.symbol.bell'),
@@ -387,7 +382,7 @@ struct Settings {
     .width('100%')
     .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.md, bottom: Spacing.md })
     .backgroundColor(Theme.bgCard(this.isDark))
-    .borderRadius(Radius.lg)
+    .borderRadius(Radius.lg * this.cardRadiusScale)
     .onClick(() => action())
   }
 }

@@ -20,8 +20,8 @@ import { util } from '@kit.ArkTS';
 import { ProtoReader } from './ProtobufCodec';
 import {
   AbstractMessage, AgreeMessage, AntiMessage, CommonRequestMessage, ConcernDataMessage,
-  DislikeInfoMessage, DislikeReasonMessage, ErrorMessage, FrsForumMessage,
-  FrsPageResponseDataMessage, FrsPageResponseMessage, FrsTabInfoMessage, GoodClassifyMessage,
+  DislikeInfoMessage, DislikeReasonMessage, ErrorMessage, FrsForumMessage, FrsForumTheme, FrsHeaderArt,
+  FrsPageResponseDataMessage, FrsPageResponseMessage, FrsSignUser, FrsTabInfoMessage, FrsThemeElement, GoodClassifyMessage,
   IconMessage, LikeForumInfoMessage, MediaMessage, MemeInfoMessage, PageMessage,
   PbContentMessage, PbPageResponseDataMessage, PbPageResponseMessage, PostDataMessage,
   PostMessage, PrivSetsMessage, SimpleForumMessage, SimpleUserMessage, ThreadInfoMessage,
@@ -619,6 +619,7 @@ export class TiebaProtoDecoder {
         else if (tag.fieldNumber === 7) result.threadList = TiebaProtoDecoder.append(result.threadList, TiebaProtoDecoder.decodeThreadInfo(value));
         else if (tag.fieldNumber === 17) result.userList = TiebaProtoDecoder.append(result.userList, TiebaProtoDecoder.decodeUser(value));
         else if (tag.fieldNumber === 22) result.frsTabInfo = TiebaProtoDecoder.append(result.frsTabInfo, TiebaProtoDecoder.decodeFrsTab(value));
+        else if (tag.fieldNumber === 23) result.headerArt = TiebaProtoDecoder.decodeFrsActivityHead(value);
       } else if (tag.wireType === 0) {
         const value = reader.readVarint();
         if (tag.fieldNumber === 8) result.threadIdList = TiebaProtoDecoder.appendNumber(result.threadIdList, value);
@@ -632,6 +633,114 @@ export class TiebaProtoDecoder {
     return result;
   }
 
+  private static decodeFrsActivityHead(data: ArrayBuffer): FrsHeaderArt | undefined {
+    const reader = new ProtoReader(data);
+    let art: FrsHeaderArt | undefined;
+    let isAd: boolean = false;
+    while (reader.hasNext()) {
+      const tag = reader.readTag();
+      if (tag === null) break;
+      if (tag.wireType === 2 && tag.fieldNumber === 3 && art === undefined) {
+        art = TiebaProtoDecoder.decodeFrsHeaderArt(reader.readBytes());
+      } else if (tag.wireType === 0 && tag.fieldNumber === 13) {
+        isAd = reader.readVarint() !== 0;
+      } else {
+        reader.skip(tag.wireType);
+      }
+    }
+    return isAd ? undefined : art;
+  }
+
+  private static decodeFrsHeaderArt(data: ArrayBuffer): FrsHeaderArt | undefined {
+    const reader = new ProtoReader(data);
+    let url: string = '';
+    let cover: string = '';
+    let color: string = '';
+    let type: number = 0;
+    while (reader.hasNext()) {
+      const tag = reader.readTag();
+      if (tag === null) break;
+      if (tag.wireType === 2 && tag.fieldNumber === 1) {
+        url = reader.readString();
+      } else if (tag.wireType === 2 && tag.fieldNumber === 24) {
+        cover = reader.readString();
+      } else if (tag.wireType === 2 && tag.fieldNumber === 26) {
+        const colors = new ProtoReader(reader.readBytes());
+        while (colors.hasNext()) {
+          const field = colors.readTag();
+          if (field === null) break;
+          if (field.wireType === 2 && field.fieldNumber === 1) color = colors.readString();
+          else colors.skip(field.wireType);
+        }
+      } else if (tag.wireType === 0 && tag.fieldNumber === 28) {
+        type = reader.readVarint();
+      } else {
+        reader.skip(tag.wireType);
+      }
+    }
+    // type 1 是静态吧头图。活动推广卡片和视频沿用列表原有行为。
+    const imageUrl: string = url || cover;
+    return type === 1 && imageUrl.length > 0 ? { url: imageUrl, color: color } : undefined;
+  }
+
+  private static decodeFrsSignInfo(data: ArrayBuffer): FrsSignUser | undefined {
+    const reader = new ProtoReader(data);
+    while (reader.hasNext()) {
+      const tag = reader.readTag();
+      if (tag === null) break;
+      if (tag.wireType !== 2 || tag.fieldNumber !== 1) {
+        reader.skip(tag.wireType);
+        continue;
+      }
+      const result: FrsSignUser = {};
+      const user = new ProtoReader(reader.readBytes());
+      while (user.hasNext()) {
+        const field = user.readTag();
+        if (field === null) break;
+        if (field.wireType !== 0) {
+          user.skip(field.wireType);
+          continue;
+        }
+        const value: number = user.readVarint();
+        if (field.fieldNumber === 1) result.userId = value;
+        else if (field.fieldNumber === 2) result.isSignIn = value;
+        else if (field.fieldNumber === 5) result.consecutiveDays = value;
+      }
+      return result;
+    }
+    return undefined;
+  }
+
+  private static decodeFrsForumTheme(data: ArrayBuffer): FrsForumTheme {
+    const result: FrsForumTheme = {};
+    const reader = new ProtoReader(data);
+    while (reader.hasNext()) {
+      const tag = reader.readTag();
+      if (tag === null) break;
+      if (tag.wireType !== 2 || tag.fieldNumber < 1 || tag.fieldNumber > 3) {
+        reader.skip(tag.wireType);
+        continue;
+      }
+      const element: FrsThemeElement = {};
+      const fields = new ProtoReader(reader.readBytes());
+      while (fields.hasNext()) {
+        const field = fields.readTag();
+        if (field === null) break;
+        if (field.wireType !== 2) {
+          fields.skip(field.wireType);
+          continue;
+        }
+        const value = fields.readString();
+        if (field.fieldNumber === 1) element.commonColor = value;
+        else if (field.fieldNumber === 2) element.darkColor = value;
+      }
+      if (tag.fieldNumber === 1) result.day = element;
+      else if (tag.fieldNumber === 2) result.night = element;
+      else result.dark = element;
+    }
+    return result;
+  }
+
   static decodeFrsForum(data: ArrayBuffer): FrsForumMessage {
     const result: FrsForumMessage = {};
     const reader = new ProtoReader(data);
@@ -640,8 +749,16 @@ export class TiebaProtoDecoder {
       if (tag.wireType === 2) {
         // field 21 = good_classify（repeated Classify 嵌套消息），须 readBytes 走消息解码，
         // 不能落进下面的 readString 分支（会产出乱码字符串）
+        if (tag.fieldNumber === 15) {
+          result.signUser = TiebaProtoDecoder.decodeFrsSignInfo(reader.readBytes());
+          continue;
+        }
         if (tag.fieldNumber === 21) {
           result.goodClassify = TiebaProtoDecoder.append(result.goodClassify, TiebaProtoDecoder.decodeGoodClassify(reader.readBytes()));
+          continue;
+        }
+        if (tag.fieldNumber === 73) {
+          result.themeColor = TiebaProtoDecoder.decodeFrsForumTheme(reader.readBytes());
           continue;
         }
         const value = reader.readString();
@@ -997,6 +1114,36 @@ export class TiebaProtoDecoder {
       } else {
         reader.skip(tag.wireType);
       }
+    }
+    return result;
+  }
+
+  static decodeAddPostResponse(data: ArrayBuffer): ErrorMessage {
+    const reader = new ProtoReader(data);
+    let result: ErrorMessage = {};
+    let hasPostId = false;
+    while (reader.hasNext()) {
+      const tag = reader.readTag();
+      if (tag === null) break;
+      if (tag.fieldNumber === 1 && tag.wireType === 2) {
+        result = TiebaProtoDecoder.decodeError(reader.readBytes());
+      } else if (tag.fieldNumber === 2 && tag.wireType === 2) {
+        const post = new ProtoReader(reader.readBytes());
+        while (post.hasNext()) {
+          const field = post.readTag();
+          if (field === null) break;
+          if (field.fieldNumber === 3 && field.wireType === 2) {
+            hasPostId = /^[1-9][0-9]*$/.test(post.readString());
+          } else {
+            post.skip(field.wireType);
+          }
+        }
+      } else {
+        reader.skip(tag.wireType);
+      }
+    }
+    if (result.errorCode === undefined && hasPostId) {
+      result.errorCode = 0;
     }
     return result;
   }

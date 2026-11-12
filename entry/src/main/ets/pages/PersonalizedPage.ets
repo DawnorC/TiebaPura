@@ -17,110 +17,24 @@
  */
 
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
-import { display } from '@kit.ArkUI';
-import { Theme, Spacing, Radius, isDarkMode, setDarkMode as applyAppDarkMode, syncDarkFromConfig, resetConfigurationToFollowSystem, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop, columnModeLabel } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, isDarkMode, setDarkMode as applyAppDarkMode, syncDarkFromConfig,
+  resetConfigurationToFollowSystem, ImmBlur, ImmMaterial, MaterialManager, fs, tabletTopFadeStop,
+  DEFAULT_PAGE_MARGIN, DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { UsageHabitsManager } from '../service/UsageHabitsManager';
 import { BRAND_BLUE } from '../common/Constants';
 
-/**
- * 「列数调整」档位选项（个性化 → 列数调整）：
- * 0 = 默认（按机型自动适配横竖屏）/ 1 = 竖二横三 / 2 = 竖三横四。
- * 仅在大屏形态（平板 / 阔直屏 / 大折叠展开）生效，手机档与窄窗不覆盖（Theme.isLargeScreenForm）。
- */
-const COLUMN_MODE_OPTIONS: number[] = [0, 1, 2];
-
-/**
- * 「列数调整」三选一弹窗（系统 CustomDialog + API 26 沉浸光感）。
- * 玻璃层交给 options.systemMaterial（ImmMaterial.dialog()），卡内不再自绘
- * backgroundColor / border / backgroundBlurStyle / shadow（与工程既有弹窗约定一致）。
- */
-@CustomDialog
-struct ColumnModeDialog {
-  /** 系统弹窗必须声明 CustomDialogController 类型属性（ArkTS 编译期强校验） */
-  controller?: CustomDialogController;
-  @Link isDark: boolean;
-  @Link fontScale: number;
-  /** 当前档位（0/1/2）：选中项高亮用 */
-  @Link mode: number;
-  /** 选定档位回调（写 AppStorage + 落盘 + 广播 columnModeTick） */
-  onPick: (mode: number) => void = () => {};
-  onDismiss: () => void = () => {};
-
-  /** 档位说明（选项副文案） */
-  private optionNote(m: number): string {
-    if (m === 1) {
-      return '竖屏 2 列 · 横屏 3 列';
-    }
-    if (m === 2) {
-      return '竖屏 3 列 · 横屏 4 列';
-    }
-    return '按设备与横竖屏自动适配';
-  }
-
-  build() {
-    Column({ space: Spacing.md }) {
-      Text('列数调整')
-        .fontSize(fs(17, this.fontScale))
-        .fontWeight(FontWeight.Bold)
-        .fontColor(Theme.textPrimary(this.isDark))
-        .textAlign(TextAlign.Center)
-        .width('100%')
-
-      Text('仅在大屏设备（平板 / 阔直屏 / 折叠屏展开）生效，手机不受影响')
-        .fontSize(fs(12, this.fontScale))
-        .fontColor(Theme.textTertiary(this.isDark))
-        .textAlign(TextAlign.Center)
-        .width('100%')
-
-      ForEach(COLUMN_MODE_OPTIONS, (m: number) => {
-        Row({ space: Spacing.sm }) {
-          Column({ space: 2 }) {
-            Text(columnModeLabel(m))
-              .fontSize(fs(15, this.fontScale))
-              .fontWeight(this.mode === m ? FontWeight.Bold : FontWeight.Medium)
-              .fontColor(Theme.textPrimary(this.isDark))
-            Text(this.optionNote(m))
-              .fontSize(fs(11, this.fontScale))
-              .fontColor(Theme.textTertiary(this.isDark))
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
-
-          if (this.mode === m) {
-            SymbolGlyph($r('sys.symbol.checkmark_circle'))
-              .fontColor([Theme.brand()])
-              .fontSize(fs(20, this.fontScale))
-          }
-        }
-        .width('100%')
-        .padding({ left: Spacing.md, right: Spacing.md, top: Spacing.md, bottom: Spacing.md })
-        .backgroundColor(this.mode === m ? (this.isDark ? '#333173FF' : '#1A3173FF') : Color.Transparent)
-        .borderRadius(Radius.md)
-        .onClick(() => { this.onPick(m); })
-      }, (m: number) => `column_mode_${m}`)
-
-      Button() {
-        Text('取消')
-          .fontSize(fs(15, this.fontScale))
-          .fontWeight(FontWeight.Medium)
-          .fontColor(Theme.textPrimary(this.isDark))
-      }
-      .width('100%')
-      .height(44)
-      .systemMaterial(ImmMaterial.cardAction())
-      .backgroundColor(this.isDark ? '#B31B1E24' : '#B3FFFFFF')
-      .borderRadius(Radius.full)
-      .shadow({ radius: 10, color: this.isDark ? '#4D000000' : '#1F101824', offsetY: 3 })
-      .onClick(() => { this.onDismiss(); })
-    }
-    .width('100%')
-    .padding(Spacing.lg)
-  }
-}
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 
 @Entry
 @Component
 struct PersonalizedPage {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
+  /** 页面边距（左右留白，实时同步；16=默认，0=贴边） */
+  @StorageLink('pageMargin') pageMargin: number = DEFAULT_PAGE_MARGIN;
   @StorageLink('fontScale') fontScale: number = 1.0;
   /** 页面可见时自增，强制组件重建使字号实时生效 */
   @State fontSizeTick: number = 0;
@@ -136,12 +50,6 @@ struct PersonalizedPage {
   }
   @State isDark: boolean = isDarkMode();
   /**
-   * 「列数调整」档位（0 = 默认 / 1 = 竖二横三 / 2 = 竖三横四）。
-   * 与 UsageHabitsManager 共用同一 AppStorage 真源：此处只读显示；
-   * 写入统一走 setColumnMode（AppStorage + 落盘 + 广播 columnModeTick，各列表页 @Watch 回写并强制回顶）。
-   */
-  @StorageLink('columnMode') columnMode: number = 0;
-  /**
    * 「帖子沉浸式阅读」开关（默认关）：详情页 / 楼中楼页向下滑动自动收起顶栏与底栏，向上滑动或回到顶部恢复。
    * 真源与 UsageHabitsManager 共用（写走 setImmersiveReading：AppStorage + 落盘），页面开关只作显示。
    */
@@ -152,28 +60,10 @@ struct PersonalizedPage {
    * 真源与 UsageHabitsManager 共用（写走 setImmersiveReadExtra：AppStorage + 落盘），页面开关只作显示。
    */
   @StorageLink('immersiveReadExtra') immersiveReadExtra: boolean = false;
-  /** 「列数调整」三选一弹窗控制器（几何与工程既有 CustomDialog 同源：宽 dialogCardWidth()、圆角 32、底部锚点 dy -110） */
-  private columnModeController: CustomDialogController = new CustomDialogController({
-    builder: ColumnModeDialog({
-      isDark: $isDark,
-      fontScale: $fontScale,
-      mode: $columnMode,
-      onPick: (m: number) => { this.pickColumnMode(m); },
-      onDismiss: () => { this.closeColumnMode(); }
-    }),
-    autoCancel: true,
-    alignment: DialogAlignment.Bottom,
-    offset: { dx: 0, dy: -110 },
-    maskColor: '#06000000',
-    cornerRadius: 32,
-    // 弹窗宽度：Dimension 不接受 'calc(100% - 48vp)' 字符串，故按窗口宽换算成数值 vp（见 dialogCardWidth）
-    width: this.dialogCardWidth(),
-    customStyle: false,
-    systemMaterial: ImmMaterial.dialog(),
-    openAnimation: { duration: 220, curve: Curve.EaseOut },
-    closeAnimation: { duration: 200, curve: Curve.EaseInOut },
-    onWillDismiss: () => { }
-  });
+  /** 「仅推荐关注的吧」开关（默认关）：首页推荐仅显示关注吧的帖子（真源与 UsageHabitsManager 共用） */
+  @StorageLink('homeOnlyFollow') onlyFollow: boolean = false;
+  /** 「楼中楼回复字号」整体缩放比例（0.7~1.1，缺省 0.9；真源与 UsageHabitsManager 共用） */
+  @StorageLink('subReplyScale') subReplyScale: number = 0.9;
 
   aboutToAppear(): void {
     MaterialManager.init();
@@ -185,34 +75,6 @@ struct PersonalizedPage {
   /** darkTick 递增（任意入口切换深色，包括系统 onConfigurationUpdate）→ 重读 isDarkMode() 翻本组件渲染色 */
   private onDarkTick(): void {
     this.isDark = isDarkMode();
-  }
-
-  /** 「列数调整」选定档位：走 manager 写 AppStorage + 落盘 + 广播，随后关闭弹窗（页面显示值经 @StorageLink 自动同步） */
-  private pickColumnMode(mode: number): void {
-    UsageHabitsManager.getInstance().setColumnMode(mode).catch(() => {
-    });
-    this.closeColumnMode();
-  }
-
-  /** 关闭「列数调整」弹窗 */
-  private closeColumnMode(): void {
-    this.columnModeController.close();
-  }
-
-  /**
-   * 「列数调整」弹窗宽度（vp 数值）—— 与收藏页 / 进吧页 / 吧主页同款：`max(200, min(400, 屏宽 − 48))`。
-   * 必须给数值：`CustomDialogControllerOptions.width` 类型是 `Dimension`，**不接受** `overlayCardWidth()`
-   * 的 `'calc(100% - 48vp)'` 字符串（2026-09-18 构建实证）。手机档 312 逐像素与既有弹窗一致，
-   * 平板 / 大折叠 / Pura X Max 同封顶 400。
-   */
-  private dialogCardWidth(): number {
-    try {
-      const info: display.Display = display.getDefaultDisplaySync();
-      const widthVp: number = info.width / info.densityPixels;
-      return Math.max(200, Math.min(400, widthVp - 48));
-    } catch (e) {
-      return 312;
-    }
   }
 
   build() {
@@ -254,11 +116,53 @@ struct PersonalizedPage {
           .width('100%')
           .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.xl, bottom: Spacing.xl })
           .backgroundColor(Theme.bgCard(this.isDark))
-          .borderRadius(Radius.lg)
+          .borderRadius(Radius.lg * this.cardRadiusScale)
           .margin({ top: Spacing.sm })
           .onClick(() => {
             this.getUIContext().getRouter().pushUrl({ url: 'pages/FontSizePage' }).catch(() => {});
           })
+
+          // 楼中楼回复字号（整体缩小、可调：以楼层正文为基准的相对缩放）
+          Column({ space: Spacing.sm }) {
+            Row({ space: Spacing.md }) {
+              Text('Aa')
+                .fontSize(fs(20, this.fontScale))
+                .fontWeight(FontWeight.Medium)
+                .fontColor(Theme.brand())
+                .width(22)
+                .textAlign(TextAlign.Center)
+              Column({ space: 2 }) {
+                Text('楼中楼回复字号')
+                  .fontSize(fs(18, this.fontScale))
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(Theme.textPrimary(this.isDark))
+                Text('楼中楼回复整体相对楼层字号缩放')
+                  .fontSize(fs(12, this.fontScale))
+                  .fontColor(Theme.textSecondary(this.isDark))
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+              Text(`${Math.round(this.subReplyScale * 100)}%`)
+                .fontSize(fs(14, this.fontScale))
+                .fontColor(Theme.textSecondary(this.isDark))
+            }
+            .width('100%')
+            Slider({ value: Math.round(this.subReplyScale * 100), min: 70, max: 110, step: 5 })
+              .selectedColor(BRAND_BLUE)
+              .onChange((value: number, mode: SliderChangeMode) => {
+                const s: number = value / 100;
+                if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
+                  UsageHabitsManager.getInstance().setSubReplyScale(s);
+                } else {
+                  AppStorage.setOrCreate('subReplyScale', s);
+                }
+              })
+          }
+          .width('100%')
+          .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.xl, bottom: Spacing.xl })
+          .backgroundColor(Theme.bgCard(this.isDark))
+          .borderRadius(Radius.lg * this.cardRadiusScale)
+          .margin({ top: Spacing.sm })
 
           // 深色模式（手动开关）：触动本开关即自动关闭「跟随系统」，使生效行为 = 本开关值
           Row({ space: Spacing.md }) {
@@ -286,7 +190,7 @@ struct PersonalizedPage {
           .width('100%')
           .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.xl, bottom: Spacing.xl })
           .backgroundColor(Theme.bgCard(this.isDark))
-          .borderRadius(Radius.lg)
+          .borderRadius(Radius.lg * this.cardRadiusScale)
           .margin({ top: Spacing.sm })
           .onClick(() => {
             // 用户意图只从点击进入，与原 onChange 逻辑完全等价：触动本开关即自动关闭「跟随系统」。
@@ -327,7 +231,7 @@ struct PersonalizedPage {
           .width('100%')
           .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.xl, bottom: Spacing.xl })
           .backgroundColor(Theme.bgCard(this.isDark))
-          .borderRadius(Radius.lg)
+          .borderRadius(Radius.lg * this.cardRadiusScale)
           .margin({ top: Spacing.sm })
           .onClick(() => {
             const isOn: boolean = !UsageHabitsManager.getInstance().isFollowSystemDark();
@@ -357,41 +261,6 @@ struct PersonalizedPage {
             }
           })
 
-          // 列数调整：三选一（默认 / 竖二横三 / 竖三横四），仅大屏形态（平板 / 阔直屏 / 大折叠展开）生效，
-          // 手机档与窄窗闸门不覆盖；阔直屏竖屏全屏走 isWideBarFullscreen 白名单放行
-          Row({ space: Spacing.md }) {
-            SymbolGlyph($r('sys.symbol.grid'))
-              .fontColor([Theme.textPrimary(this.isDark)])
-              .fontSize(fs(22, this.fontScale))
-
-            Column({ space: 2 }) {
-              Text('列数调整')
-                .fontSize(fs(18, this.fontScale))
-                .fontWeight(FontWeight.Medium)
-                .fontColor(Theme.textPrimary(this.isDark))
-              Text('平板 / 阔直屏 / 折叠屏展开的列表列数')
-                .fontSize(fs(12, this.fontScale))
-                .fontColor(Theme.textSecondary(this.isDark))
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-            .margin({ left: Spacing.xs })
-
-            Text(columnModeLabel(this.columnMode))
-              .fontSize(fs(14, this.fontScale))
-              .fontColor(Theme.textTertiary(this.isDark))
-
-            SymbolGlyph($r('sys.symbol.chevron_right'))
-              .fontColor([Theme.textTertiary(this.isDark)])
-              .fontSize(fs(18, this.fontScale))
-          }
-          .width('100%')
-          .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.xl, bottom: Spacing.xl })
-          .backgroundColor(Theme.bgCard(this.isDark))
-          .borderRadius(Radius.lg)
-          .margin({ top: Spacing.sm })
-          .onClick(() => { this.columnModeController.open(); })
-
           // 帖子沉浸式阅读：详情页向下滑动自动收起顶栏与底栏（向上滑动 / 回到顶部恢复）。
           // 与上方「跟随系统深色模式」开关同模式：Toggle 只作显示（hitTestBehavior(None)），
           // 用户意图一律由外层 Row.onClick 承接，防编程性 isOn 变化误触 onChange。
@@ -420,7 +289,7 @@ struct PersonalizedPage {
           .width('100%')
           .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.xl, bottom: Spacing.xl })
           .backgroundColor(Theme.bgCard(this.isDark))
-          .borderRadius(Radius.lg)
+          .borderRadius(Radius.lg * this.cardRadiusScale)
           .margin({ top: Spacing.sm })
           .onClick(() => {
             const isOn: boolean = !UsageHabitsManager.getInstance().isImmersiveReading();
@@ -454,15 +323,47 @@ struct PersonalizedPage {
           .width('100%')
           .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.xl, bottom: Spacing.xl })
           .backgroundColor(Theme.bgCard(this.isDark))
-          .borderRadius(Radius.lg)
+          .borderRadius(Radius.lg * this.cardRadiusScale)
           .margin({ top: Spacing.sm })
           .onClick(() => {
             const isOn: boolean = !UsageHabitsManager.getInstance().isImmersiveReadExtra();
             UsageHabitsManager.getInstance().setImmersiveReadExtra(isOn);
           })
+
+          // 仅推荐关注的吧：首页推荐仅显示关注吧的帖子（自「使用习惯」页并入）
+          Row({ space: Spacing.md }) {
+            SymbolGlyph($r('sys.symbol.hand'))
+              .fontColor([Theme.brand()])
+              .fontSize(fs(22, this.fontScale))
+
+            Column({ space: 2 }) {
+              Text('仅推荐关注的吧')
+                .fontSize(fs(18, this.fontScale))
+                .fontWeight(FontWeight.Medium)
+                .fontColor(Theme.textPrimary(this.isDark))
+              Text('首页推荐仅显示关注吧的帖子')
+                .fontSize(fs(12, this.fontScale))
+                .fontColor(Theme.textSecondary(this.isDark))
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            Toggle({ type: ToggleType.Switch, isOn: this.onlyFollow })
+              .selectedColor(BRAND_BLUE)
+              .hitTestBehavior(HitTestMode.None)
+          }
+          .width('100%')
+          .padding({ left: Spacing.lg, right: Spacing.lg, top: Spacing.xl, bottom: Spacing.xl })
+          .backgroundColor(Theme.bgCard(this.isDark))
+          .borderRadius(Radius.lg * this.cardRadiusScale)
+          .margin({ top: Spacing.sm })
+          .onClick(() => {
+            const isOn: boolean = !UsageHabitsManager.getInstance().isOnlyFollow();
+            UsageHabitsManager.getInstance().setOnlyFollow(isOn);
+          })
         }
         .width('100%')
-        .padding({ left: Spacing.lg, right: Spacing.lg, bottom: Spacing.xl })
+        .padding({ left: this.pageMargin, right: this.pageMargin, bottom: Spacing.xl })
       }
       .scrollBar(BarState.Off)
       .scrollable(ScrollDirection.Vertical)
@@ -472,8 +373,8 @@ struct PersonalizedPage {
       .clip(false)
       .align(Alignment.TopStart)
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .overlay(this.BottomFadeOverlay())
-      .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+      .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+      .overlay(() => { TopGlassVeil() })
 
       // 悬浮沉浸顶栏（透明底，内容可穿过；参数同 Settings.ets）
       this.TopBar()
@@ -512,19 +413,5 @@ struct PersonalizedPage {
     .padding({ left: Spacing.lg, right: Spacing.lg, top: 44, bottom: 10 })
     .backgroundColor(Color.Transparent)
     .zIndex(14)
-  }
-
-  /** 渐变沉浸遮罩：顶部渐显（同 Settings.ets / Index「我的」范式） */
-  @Builder
-  BottomFadeOverlay() {
-    Stack()
-      .height('100%')
-      .width('100%')
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [['#00FFFFFF', 0.0], ['#FFFFFFFF', tabletTopFadeStop(98)], ['#FFFFFFFF', 1.0]]
-      })
-      .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-      .hitTestBehavior(HitTestMode.None)
   }
 }

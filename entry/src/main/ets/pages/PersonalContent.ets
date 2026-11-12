@@ -29,9 +29,16 @@ import { AuthManager } from '../service/AuthManager';
 import { HistoryStore } from '../service/HistoryStore';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { curves, display } from '@kit.ArkUI';
-import { Theme, Spacing, Radius, Breakpoint, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, isWideBarDevice, isLargeFoldDevice, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns, isLargeScreenForm, isWideBarFullscreen } from '../common/Theme';
+import {
+  Theme, Spacing, Radius, Breakpoint, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, isWideBarDevice,
+  isLargeFoldDevice, isWideFormDevice as detectWideFormDevice, readColumnMode, overrideColumns,
+  isLargeScreenForm, isWideBarFullscreen,
+  DEFAULT_CARD_RADIUS_SCALE
+} from '../common/Theme';
 import { LoadingView, EmptyView, ErrorView } from '../components/CommonComponents';
 
+import { TopBarFx } from '../components/TopBarFx';
+import { TopGlassVeil } from '../components/TopGlassVeil';
 enum PersonalMode {
   Posts = 'posts',
   Likes = 'likes',
@@ -69,6 +76,8 @@ const PERSONAL_PREFETCH_THROTTLE: number = 120;
 @Entry
 @Component
 struct PersonalContent {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
+  @StorageLink('topBarFxTick') tbxTick: number = 0;
   @State mode: string = PersonalMode.Posts;
   @State title: string = '我的帖子';
   @State items: PersonalContentItem[] = [];
@@ -405,11 +414,6 @@ struct PersonalContent {
         .onRefreshing(() => { this.pullRefresh(); })
       }
 
-      // 顶部渐显带（2026-09-29，同进吧页 TopFadeBand 同款）：固定 98 高背景色渐变条盖在列表内容上、
-      // 顶栏材质之下，让滚过顶栏的卡片渐隐不生硬。此前版本曾因「随 Refresh 容器下移压到首卡」被移除，
-      // 现按进吧页改固定高度不再随容器下移。hitTestBehavior None 不挡点击。
-      this.TopFadeBand()
-
       // 悬浮顶栏（内容可穿过）；官方 title 槽位路径下已在槽位里（PersonalTitleBar），不再叠一层
       if (!(PERSONAL_CONTENT_OFFICIAL_TITLE_BAR && this.materialSupported)) {
         this.TopBar()
@@ -419,6 +423,11 @@ struct PersonalContent {
     .height('100%')
     .backgroundColor(Theme.bg(this.isDark))
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    // 顶部真·渐变模糊（对齐「消息/我的」范式）：挂全高内容根容器，渐变带从 y=0 起覆盖
+    // 状态栏+标题区；卡片经 Refresh clip(false) 上溢穿过顶栏下方时被渐进模糊
+    // （替代已删除的 GradientBlurBar 纯色渐变条假遮罩）。
+    .linearGradientBlur(TopBarFx.blur(this.tbxTick), { fractionStops: [[1.0, 0.0], [1.0, TopBarFx.solid(this.tbxTick)], [0.0, TopBarFx.fade(this.tbxTick)], [0.0, 1.0]], direction: GradientDirection.Bottom })
+    .overlay(() => { TopGlassVeil() })
     // 内容区实宽（分桶估算列宽用）+ 形态变化兜底（横竖屏 / 分屏拖宽：§4.11 P-B，与 §4.8 T-B 同款同点追加）
     .onAreaChange((_old: Area, n: Area) => {
       this.currentWidth = n.width as number;
@@ -901,26 +910,6 @@ struct PersonalContent {
     return '暂时没有浏览历史';
   }
 
-  /**
-   * 顶部满宽渐显带（同进吧页 ForumsTab.TopFadeBand 逐项同款）：固定 98 高 = 顶栏高，背景色渐变条
-   * 叠在列表内容之上（视觉等价内容渐隐），宽度不依赖滚动容器 / 离屏层解析；渐变自顶部线性、
-   * 无全实段（否则内容到顶栏会被"硬切"）。
-   */
-  @Builder
-  TopFadeBand() {
-    Column()
-      .width('100%')
-      .height(98)
-      .linearGradient({
-        direction: GradientDirection.Bottom,
-        colors: [
-          [Theme.bg(this.isDark), 0.0],
-          [this.isDark ? '#00101114' : '#00F2F4F7', 1.0]
-        ]
-      })
-      .hitTestBehavior(HitTestMode.None)
-  }
-
   /** 兜底路径专用（开关关闭 / 低版本时才挂载）：页面主体悬浮自绘玻璃顶栏 */
   @Builder
   TopBar() {
@@ -1050,7 +1039,7 @@ struct PersonalContent {
     .backgroundColor(Theme.bgCard(this.isDark))
     // 卡片圆角 26：我的帖子 / 我的点赞 / 浏览历史 / 我的收藏四页共用本卡片，与首页 ThreadCard、
     // 详情页卡片统一口径（不借用全局 Radius.lg）
-    .borderRadius(26)
+    .borderRadius(26 * this.cardRadiusScale)
     .margin({ bottom: bottomMargin })
     .onClick(() => {
       // 点击即预取：利用跳转动画窗口后台取详情，详情页打开即命中缓存秒开

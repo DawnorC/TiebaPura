@@ -23,9 +23,13 @@ import { FontSizeManager } from '../service/FontSizeManager';
 import { UsageHabitsManager } from '../service/UsageHabitsManager';
 import { TiebaService } from '../service/TiebaService';
 import { CacheManager } from '../cache/CacheManager';
-import { CACHE_KEY, CACHE_TTL, PRIVACY_POLICY_URL, PRIVACY_POLICY_VERSION } from '../common/Constants';
-import { FollowItem, UserInfo, UserStats } from '../model/DataModel';
-import { Theme, fs, isDarkMode, initDarkMode, ImmBlur, ImmMaterial, MaterialManager, isLargeFoldDevice, isPuraXMaxDevice, Breakpoint } from '../common/Theme';
+import { CACHE_KEY, PRIVACY_POLICY_URL, PRIVACY_POLICY_VERSION } from '../common/Constants';
+import { UserInfo } from '../model/DataModel';
+import {
+  Theme, fs, isDarkMode, initDarkMode, ImmBlur, ImmMaterial, MaterialManager, isLargeFoldDevice, isPuraXMaxDevice,
+  Breakpoint, FLOATING_DOCK_PHONE_HEIGHT, FLOATING_DOCK_PHONE_INSET
+} from '../common/Theme';
+import { BottomBarBackdrop } from '../components/BottomBarBackdrop';
 import { FrameRateBoost } from '../common/FrameRateBoost';
 import { PerfTrace } from '../common/PerfTrace';
 import {
@@ -50,10 +54,10 @@ enum TabIndex {
 // 调整口诀：BAR_H_PHONE 改 n，则 BAR_RADIUS_PHONE 同步改 n/2；
 // ITEM_H_PHONE 改 m，则 ITEM_RADIUS_PHONE 同步改 m/2（Glow 高度自动跟随条目高）。
 // 留白估算：上下留白 ≈ PAD_V_PHONE + (BAR_H_PHONE - ITEM_H_PHONE) / 2 + (ITEM_H_PHONE - 内容高) / 2
-const BAR_H_PHONE = 66;          // 手机档底栏总高（原 74）
-const BAR_RADIUS_PHONE = 33;     // 手机档胶囊圆角 = 栏高/2
-const ITEM_H_PHONE = 54;         // 手机档单条目高（原 58）
-const ITEM_RADIUS_PHONE = 27;    // 手机档条目圆角 = 条目高/2
+const BAR_H_PHONE = FLOATING_DOCK_PHONE_HEIGHT;
+const BAR_RADIUS_PHONE = BAR_H_PHONE / 2;
+const ITEM_H_PHONE = 48;
+const ITEM_RADIUS_PHONE = ITEM_H_PHONE / 2;
 const PAD_V_PHONE = 4;           // 手机档条目行上下内边距（原 6）
 const BAR_H_WIDE = 74;           // 宽屏/平板**竖屏**档总高（维持现状，勿动）
 const BAR_RADIUS_WIDE = 37;
@@ -89,6 +93,12 @@ const BAR_BOTTOM_MARGIN: number = 30;
 @Component
 struct Index {
   @State selectedTab: number = TabIndex.Home;
+  // 界面布局：Dock 顺序（逗号串，随设置页/manager 同步）与页面边距（左右留白 vp）
+  @StorageLink('dockOrder') dockOrderStr: string = '0,1,2,3,4';
+  // 切页平移动画开关（true=播放 320ms 左右平移；false=瞬时切换）
+  @StorageLink('tabAnimEnabled') tabAnimEnabled: boolean = true;
+  // Dock 隐藏项（TabIndex 逗号串，实时同步）
+  @StorageLink('dockHidden') @Watch('onDockHiddenChanged') dockHiddenStr: string = '';
   // Tab 滑入动画：prevTab 记录正在退场滑出的页面（-1 表示无）；inOffset/outOffset 为进场/退场页横向位移百分比
   @State prevTab: number = -1;
   @State inOffset: number = 0;
@@ -96,18 +106,12 @@ struct Index {
   private animLock: boolean = false;
   // 收藏页常驻：记录上次登录态 key（登录/登出/换号时变化），用于通知收藏页刷新账号数据
   private favLoginLastKey: string = '';
-  // 关注吧快照（进吧页自管渲染）：供「我的」页关注吧统计与宿主回传使用
-  @State follows: FollowItem[] = [];
   @StorageLink('darkTick') @Watch('onDarkTick') darkTick: number = 0;
   @State isDark: boolean = false;
+  @StorageLink('bottomBarBackdrop') bottomBarBackdrop: boolean = false;
   @State loggedIn: boolean = false;
   @State userName: string = '';
   @State userAvatar: string = '';
-  @State userStats: UserStats = { postCount: -1, agreeCount: -1 };
-  @State statsLoading: boolean = false;
-  @State statsError: boolean = false;
-  @State followUserCount: number = -1;
-  @State followUserLoading: boolean = false;
   /** 当前用户头部昵称是否已用 profile 实时昵称校准（本会话仅校准一次，避免频繁请求） */
   userProfileVerified: boolean = false;
   @State isWideScreen: boolean = false;
@@ -172,6 +176,14 @@ struct Index {
     // 必须在读 config.colorMode 之前完成，否则冷启动会按 v1.x 「永远跟随系统」语义兜底，
     // 旧用户启过深色模式再重启仍会被打回浅色。
     await UsageHabitsManager.getInstance().init(this.getUIAbilityContext());
+    // 界面布局：启动默认显示界面（在合规闸门放行前设定，确保首屏即落在所选 Tab）
+    const preferredTab: number = UsageHabitsManager.getInstance().getDefaultTab();
+    // 若默认界面已被隐藏，则回退到首个可见页
+    const startTab: number = UsageHabitsManager.getInstance().isTabHidden(preferredTab)
+      ? UsageHabitsManager.getInstance().getFirstVisibleTab()
+      : preferredTab;
+    this.selectedTab = startTab;
+    AppStorage.setOrCreate<number>('currentMainTab', startTab);
     const followSys: boolean = UsageHabitsManager.getInstance().isFollowSystemDark();
     const sysDark: boolean = this.getUIAbilityContext().config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
     // 跟随系统：取系统当前态；否则按用户手动设置（首次启动默认 false=浅色）
@@ -329,12 +341,6 @@ struct Index {
       UsageHabitsManager.getInstance().init(this.getUIAbilityContext()),
     ]);
     this.refreshLoginState();
-    // 进吧页已抽为自含组件（挂载即加载）：这里仅同步关注吧快照，供「我的」页关注吧统计使用
-    this.loadFollowsForMine();
-    if (this.loggedIn) {
-      this.loadUserStats();
-      this.loadFollowUserCount();
-    }
     // 头部昵称校准：onPageShow 可能早于登录态初始化完成而跳过，
     // 这里在 init 完成后兜底执行一次（userProfileVerified 保证本会话只校准一次）
     if (this.loggedIn && (!this.userProfileVerified || this.userName === '' || this.userName === '贴吧用户' || this.userAvatar === '')) {
@@ -346,27 +352,6 @@ struct Index {
     AppStorage.setOrCreate<number>('homeBootRequest', (AppStorage.get<number>('homeBootRequest') ?? 0) + 1);
   }
 
-  /** 加载当前账号关注吧快照：缓存直出 + 网络覆盖写缓存，供 MineTab 关注吧统计与宿主快照使用 */
-  private async loadFollowsForMine(): Promise<void> {
-    if (!this.loggedIn) {
-      this.follows = [];
-      return;
-    }
-    try {
-      const cached = await CacheManager.getInstance().getWithTtl<FollowItem[]>(CACHE_KEY.FOLLOW_LIST);
-      if (cached && cached.length > 0) {
-        this.follows = cached;
-      }
-      const result = await TiebaService.getInstance().fetchFollowList(1);
-      if (result.list.length > 0) {
-        this.follows = result.list;
-        await CacheManager.getInstance().putWithTtl(CACHE_KEY.FOLLOW_LIST, result.list, CACHE_TTL.FOLLOW_LIST);
-      }
-    } catch (e) {
-      // 快照加载失败不阻断启动
-    }
-  }
-
   onPageShow(): void {
     // 合规闸门未通过（首启同意弹窗仍在展示）时，不做任何登录态读取与刷新动作
     if (this.privacyPhase < 2) {
@@ -376,14 +361,9 @@ struct Index {
     // 若不在本钩子复位，回到宿主的帧统计会被错误归到二级页头上
     PerfTrace.setPage('Index', this.perfTabName(this.selectedTab));
     this.refreshLoginState();
-    if (this.loggedIn) {
-      this.loadUserStats();
-      this.loadFollowUserCount();
-    } else {
-      this.userStats = { postCount: -1, agreeCount: -1 };
-      this.followUserCount = -1;
-      this.statsError = false;
-    }
+    // 「我的」页已重构为自含组件：自增 mineRefreshRequest 通知其缓存优先重载三项统计
+    // （登录/登出/换号由 refreshLoginState 内的 tabLoginRefresh 广播处理）
+    AppStorage.setOrCreate<number>('mineRefreshRequest', (AppStorage.get<number>('mineRefreshRequest') ?? 0) + 1);
     // 头部昵称与列表/详情保持一致：首次进入（或本地仍是占位名/旧用户名）时
     // 用 profile 实时昵称校准一次；成功后本会话不再重复请求
     if (this.loggedIn && (!this.userProfileVerified || this.userName === '' || this.userName === '贴吧用户' || this.userAvatar === '')) {
@@ -398,45 +378,6 @@ struct Index {
     // @StorageLink('fontScale') 同步不会触发重绘（工程已知"离屏缓存不刷新"问题）→ 自增 fontTick，
     // 各 Tab @Watch 响应后显式回写 fontScale 触发本页依赖刷新（与 darkTick 深色联动同款模式）
     AppStorage.setOrCreate<number>('fontTick', (AppStorage.get<number>('fontTick') ?? 0) + 1);
-  }
-
-  private async loadUserStats(): Promise<void> {
-    if (this.statsLoading || !this.loggedIn) {
-      return;
-    }
-    const user = AuthManager.getInstance().getUser();
-    const userId: string = user?.userId ?? '';
-    if (userId.trim().length === 0) {
-      this.userStats = { postCount: -1, agreeCount: -1 };
-      this.statsError = true;
-      return;
-    }
-    this.statsLoading = true;
-    this.statsError = false;
-    try {
-      this.userStats = await TiebaService.getInstance().fetchUserStats(userId);
-    } catch (e) {
-      this.statsError = true;
-      this.userStats = { postCount: -1, agreeCount: -1 };
-    } finally {
-      this.statsLoading = false;
-    }
-  }
-
-  /** 加载当前登录用户的关注用户总数（follow_list 接口 total 字段；失败降级 '--'） */
-  private async loadFollowUserCount(): Promise<void> {
-    if (this.followUserLoading || !this.loggedIn) {
-      return;
-    }
-    this.followUserLoading = true;
-    try {
-      const result = await TiebaService.getInstance().fetchFollowUserList(0, 1);
-      this.followUserCount = result.total > 0 ? result.total : result.list.length;
-    } catch (e) {
-      this.followUserCount = -1;
-    } finally {
-      this.followUserLoading = false;
-    }
   }
 
   private async refreshUserProfile(): Promise<void> {
@@ -460,8 +401,8 @@ struct Index {
       });
       this.userProfileVerified = true;
       this.refreshLoginState();
-      await this.loadUserStats();
-      await this.loadFollowUserCount();
+      // 昵称/头像校准完成：通知自含 MineTab 重读账号资料并缓存优先重载统计
+      AppStorage.setOrCreate<number>('mineRefreshRequest', (AppStorage.get<number>('mineRefreshRequest') ?? 0) + 1);
     } catch (e) {
       // 保留本地登录态和首字母头像兜底。
     }
@@ -472,11 +413,6 @@ struct Index {
     const user: UserInfo | null = AuthManager.getInstance().getUser();
     this.userName = user?.name ?? '';
     this.userAvatar = user?.avatar ?? '';
-    if (!this.loggedIn) {
-      this.userStats = { postCount: -1, agreeCount: -1 };
-      this.followUserCount = -1;
-      this.statsError = false;
-    }
     // 收藏页常驻（不随 Tab 切换重建）：登录/登出/换号时递增 favLoginRefresh，通知收藏页重载账号数据
     const loginKey: string = `${this.loggedIn ? '1' : '0'}|${user?.userId ?? ''}`;
     if (loginKey !== this.favLoginLastKey) {
@@ -492,13 +428,10 @@ struct Index {
     this.isDark = isDarkMode();
   }
 
-  /** 我的页退出登录（由 MineTab 回调触发）：登出→全局登录态刷新→清统计；进吧页已自管，无需再清 forumState */
+  /** 我的页退出登录（由 MineTab 回调触发）：登出→全局登录态刷新；统计清零由 MineTab 响应 tabLoginRefresh 广播自含完成 */
   private handleMineLogout(): void {
     AuthManager.getInstance().logout().then(() => {
       this.refreshLoginState();
-      this.userStats = { postCount: -1, agreeCount: -1 };
-      this.followUserCount = -1;
-      this.statsError = false;
     }).catch(() => {
     });
   }
@@ -551,6 +484,18 @@ struct Index {
       // 应用内/外部（官网、官方 App）的关注变更都不刷新
       console.info(`[FORUMS-FOLLOW] index switchTab forums tickWillSet`);
       AppStorage.setOrCreate<number>('forumsRefreshRequest', (AppStorage.get<number>('forumsRefreshRequest') ?? 0) + 1);
+    }
+    if (index === TabIndex.Mine) {
+      // 切到我的页：通知自含 MineTab 缓存优先重载三项统计（离屏期间数据已由各 tick 更新，此处兜底保证秒开）
+      AppStorage.setOrCreate<number>('mineRefreshRequest', (AppStorage.get<number>('mineRefreshRequest') ?? 0) + 1);
+    }
+    // 切页平移动画开关：关闭时瞬时切换，不播放左右平移
+    if (!this.tabAnimEnabled) {
+      this.inOffset = 0;
+      this.outOffset = 0;
+      this.prevTab = -1;
+      this.animLock = false;
+      return;
     }
     // 初始位置（无动画赋值）：新页从 dir 方向侧外进入，旧页原位准备退场
     this.inOffset = dir * 100;
@@ -637,6 +582,9 @@ struct Index {
         } else {
           this.PagesStack()
           if (!this.favEditing) {
+            if (this.bottomBarBackdrop && !this.barContentHidden) {
+              BottomBarBackdrop({ heightVp: this.barHeightVal() + BAR_BOTTOM_MARGIN + 16, isDark: this.isDark })
+            }
             this.BottomBar()
           }
         }
@@ -808,6 +756,8 @@ struct Index {
     // 改走 ThreadDetail DT-N 已验证方案：barHeight 不动，玻璃用 barWidth→0 + material empty 隐去。
     .barHeight(this.favEditing ? 0 : this.barHeightVal())
     .barBackgroundColor(Color.Transparent)
+    .barBackgroundBlurStyle(this.bottomBarBackdrop && !this.favEditing && !this.barSlotRemoved
+      ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE)
     // 收藏编辑态：barHeight 收 0 后官方悬浮背板仍会残留一条磨砂，故编辑态整体不传 floating style
     // （Optional 传 undefined，既有已验证行为不动）；沉浸隐藏态传「零面积样式」（见 floatingBarStyle）
     .barFloatingStyle(this.favEditing ? undefined : this.floatingBarStyle())
@@ -831,7 +781,9 @@ struct Index {
           mediumBarWidth: 0,
           largeBarWidth: 0
         },
-        barBottomMargin: 30,
+        barBottomMargin: BAR_BOTTOM_MARGIN,
+        maskColor: Color.Transparent,
+        maskHeight: 0,
         systemMaterial: ImmMaterial.empty()
       };
     }
@@ -841,7 +793,9 @@ struct Index {
         mediumBarWidth: this.pillWidth(),
         largeBarWidth: this.pillWidth()
       },
-      barBottomMargin: 30,
+      barBottomMargin: BAR_BOTTOM_MARGIN,
+      maskColor: this.bottomBarBackdrop ? (this.isDark ? '#99000000' : '#CCF1F3F5') : Color.Transparent,
+      maskHeight: this.bottomBarBackdrop ? this.barHeightVal() + BAR_BOTTOM_MARGIN + 16 : 0,
       systemMaterial: ImmMaterial.floatingBar()
     };
   }
@@ -852,7 +806,7 @@ struct Index {
       // 横竖屏同值
       return 400;
     }
-    const w: number = this.currentWidth > 0 ? this.currentWidth - 48 : 312;
+    const w: number = (this.currentWidth > 0 ? this.currentWidth : 360) - 2 * FLOATING_DOCK_PHONE_INSET;
     return w > 240 ? w : 240;
   }
 
@@ -917,6 +871,84 @@ struct Index {
     return this.isWideLandscape() ? PAD_V_WIDE_LAND : PAD_V_WIDE;
   }
 
+  /** 解析 Dock 顺序为合法 TabIndex 数组（缺项补齐，保证 5 项） */
+  private dockOrderArr(): number[] {
+    const parts: string[] = this.dockOrderStr.split(',');
+    const out: number[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const n: number = Number.parseInt(parts[i].trim(), 10);
+      if (!Number.isNaN(n) && n >= 0 && n <= 4 && out.indexOf(n) < 0) {
+        out.push(n);
+      }
+    }
+    for (let k = 0; k <= 4; k++) {
+      if (out.indexOf(k) < 0) {
+        out.push(k);
+      }
+    }
+    return out;
+  }
+
+  private dockHiddenArr(): number[] {
+    const parts: string[] = this.dockHiddenStr.split(',');
+    const out: number[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const n: number = Number.parseInt(parts[i].trim(), 10);
+      if (!Number.isNaN(n) && n >= 0 && n <= 4 && out.indexOf(n) < 0) {
+        out.push(n);
+      }
+    }
+    return out;
+  }
+
+  /** 当前需要展示在 Dock 的 Tab（按 order 过滤隐藏项；空则回退全部） */
+  private dockVisibleArr(): number[] {
+    const hidden: number[] = this.dockHiddenArr();
+    const order: number[] = this.dockOrderArr();
+    const out: number[] = [];
+    for (let i = 0; i < order.length; i++) {
+      if (hidden.indexOf(order[i]) < 0) {
+        out.push(order[i]);
+      }
+    }
+    return out.length > 0 ? out : order;
+  }
+
+  /** Dock 隐藏项变化：当前选中页被隐藏则瞬时切到首个可见页 */
+  onDockHiddenChanged(): void {
+    // 冷启动恢复期（合规闸门未放行）不响应（2026-11-10 修复「首页隐藏时冷启动闪现首页再切走」）：
+    // 恢复流程写 AppStorage('dockHidden') 会触发本 watch，此刻 selectedTab 仍是初始值（首页），
+    // 若照常执行会对隐藏中的首页误发一次 switchTab，与 aboutToAppear 的启动落点计算
+    // （182~187 行，含「默认页被隐藏则回退首个可见页」）互相踩踏。放行后的隐藏项变化仍即时切换。
+    if (this.privacyPhase < 2) {
+      return;
+    }
+    if (this.dockHiddenArr().indexOf(this.selectedTab) >= 0) {
+      const vis: number[] = this.dockVisibleArr();
+      const next: number = vis.length > 0 ? vis[0] : TabIndex.Home;
+      if (next !== this.selectedTab) {
+        this.switchTab(next);
+      }
+    }
+  }
+
+  /** Dock 项文字标签（用于无障碍与展示） */
+  private tabLabel(index: number): string {
+    if (index === TabIndex.Forums) {
+      return '进吧';
+    }
+    if (index === TabIndex.Favorite) {
+      return '收藏';
+    }
+    if (index === TabIndex.Messages) {
+      return '消息';
+    }
+    if (index === TabIndex.Mine) {
+      return '我的';
+    }
+    return '首页';
+  }
+
   @Builder
   FloatingBarSlot() {
     // 沉浸隐藏态内容**保持挂载**（仅整体平移出屏 + 淡出 + 禁用命中，见下方属性链）：
@@ -924,22 +956,18 @@ struct Index {
     if (!this.favEditing) {
       Stack() {
         Row() {
-          this.BottomGlow(TabIndex.Home)
-          this.BottomGlow(TabIndex.Forums)
-          this.BottomGlow(TabIndex.Favorite)
-          this.BottomGlow(TabIndex.Messages)
-          this.BottomGlow(TabIndex.Mine)
+          ForEach(this.dockVisibleArr(), (idx: number) => {
+            this.BottomGlow(idx)
+          }, (idx: number) => 'glow-' + idx)
         }
         .width('100%')
         .height('100%')
         .padding({ left: 8, right: 8, top: this.padVVal(), bottom: this.padVVal() })
 
         Row() {
-          this.BottomItem('⌂', '首页', TabIndex.Home)
-          this.BottomItem('▦', '进吧', TabIndex.Forums)
-          this.BottomItem('★', '收藏', TabIndex.Favorite)
-          this.BottomItem('✉', '消息', TabIndex.Messages)
-          this.BottomItem('♙', '我的', TabIndex.Mine)
+          ForEach(this.dockVisibleArr(), (idx: number) => {
+            this.BottomItem('', this.tabLabel(idx), idx)
+          }, (idx: number) => 'item-' + idx)
         }
         .width('100%')
         .height('100%')
@@ -970,17 +998,17 @@ struct Index {
       .zIndex(this.tabLayer(TabIndex.Home))
       .visibility(this.selectedTab === TabIndex.Home || this.prevTab === TabIndex.Home
         ? Visibility.Visible : Visibility.Hidden)
-      if (this.prevTab === TabIndex.Forums || this.selectedTab === TabIndex.Forums) {
-        Stack() {
-          ForumsTab({
-            onFollowsSync: (list: FollowItem[]): void => { this.follows = list; }
-          })
-        }
-        .width('100%')
-        .height('100%')
-        .translate({ x: this.tabOffset(TabIndex.Forums) })
-        .zIndex(this.tabLayer(TabIndex.Forums))
+      // 进吧页常驻组件树：避免切走后组件销毁 → 重进重载 / 首次挂载整页构建与切页动画同帧卡顿。
+      // 非当前页/非动画期间用 visibility 隐藏（Hidden 不绘制、不重建，状态与滚动位置保留）。
+      Stack() {
+        ForumsTab()
       }
+      .width('100%')
+      .height('100%')
+      .translate({ x: this.tabOffset(TabIndex.Forums) })
+      .zIndex(this.tabLayer(TabIndex.Forums))
+      .visibility(this.selectedTab === TabIndex.Forums || this.prevTab === TabIndex.Forums
+        ? Visibility.Visible : Visibility.Hidden)
       // 收藏页常驻组件树：避免切走后组件销毁导致数据重载（重进收藏页重现加载态）。
       // 非当前页/非动画期间用 visibility 隐藏（Hidden 不绘制、不重建，状态与滚动位置保留）。
       Stack() {
@@ -992,36 +1020,29 @@ struct Index {
       .zIndex(this.tabLayer(TabIndex.Favorite))
       .visibility(this.selectedTab === TabIndex.Favorite || this.prevTab === TabIndex.Favorite
         ? Visibility.Visible : Visibility.Hidden)
-      if (this.prevTab === TabIndex.Messages || this.selectedTab === TabIndex.Messages) {
-        Stack() {
-          MessagesTab()
-        }
-        .width('100%')
-        .height('100%')
-        .translate({ x: this.tabOffset(TabIndex.Messages) })
-        .zIndex(this.tabLayer(TabIndex.Messages))
+      // 消息页常驻组件树：避免切走后组件销毁 → 重进重载 / 首次挂载整页构建与切页动画同帧卡顿。
+      Stack() {
+        MessagesTab()
       }
-      if (this.prevTab === TabIndex.Mine || this.selectedTab === TabIndex.Mine) {
-        Stack() {
-          MineTab({
-            loggedIn: $loggedIn,
-            userName: $userName,
-            userAvatar: $userAvatar,
-            userStats: $userStats,
-            statsLoading: $statsLoading,
-            statsError: $statsError,
-            followUserCount: $followUserCount,
-            followUserLoading: $followUserLoading,
-            follows: $follows,
-            openFavorite: (): void => { this.switchTab(TabIndex.Favorite); },
-            onLogout: (): void => { this.handleMineLogout(); }
-          })
-        }
-        .width('100%')
-        .height('100%')
-        .translate({ x: this.tabOffset(TabIndex.Mine) })
-        .zIndex(this.tabLayer(TabIndex.Mine))
+      .width('100%')
+      .height('100%')
+      .translate({ x: this.tabOffset(TabIndex.Messages) })
+      .zIndex(this.tabLayer(TabIndex.Messages))
+      .visibility(this.selectedTab === TabIndex.Messages || this.prevTab === TabIndex.Messages
+        ? Visibility.Visible : Visibility.Hidden)
+      // 我的页常驻组件树：避免切走后组件销毁 → 重进重载（用户统计/关注用户重新拉取）/ 首次挂载卡顿。
+      Stack() {
+        MineTab({
+          openFavorite: (): void => { this.switchTab(TabIndex.Favorite); },
+          onLogout: (): void => { this.handleMineLogout(); }
+        })
       }
+      .width('100%')
+      .height('100%')
+      .translate({ x: this.tabOffset(TabIndex.Mine) })
+      .zIndex(this.tabLayer(TabIndex.Mine))
+      .visibility(this.selectedTab === TabIndex.Mine || this.prevTab === TabIndex.Mine
+        ? Visibility.Visible : Visibility.Hidden)
     }
     .width('100%')
     .height('100%')
@@ -1035,28 +1056,24 @@ struct Index {
   BottomBar() {
     Stack() {
       Row() {
-        this.BottomGlow(TabIndex.Home)
-        this.BottomGlow(TabIndex.Forums)
-        this.BottomGlow(TabIndex.Favorite)
-        this.BottomGlow(TabIndex.Messages)
-        this.BottomGlow(TabIndex.Mine)
+        ForEach(this.dockVisibleArr(), (idx: number) => {
+          this.BottomGlow(idx)
+        }, (idx: number) => 'glow-' + idx)
       }
       .width('100%')
       .height('100%')
       .padding({ left: 8, right: 8, top: this.padVVal(), bottom: this.padVVal() })
 
       Row() {
-        this.BottomItem('⌂', '首页', TabIndex.Home)
-        this.BottomItem('▦', '进吧', TabIndex.Forums)
-        this.BottomItem('★', '收藏', TabIndex.Favorite)
-        this.BottomItem('✉', '消息', TabIndex.Messages)
-        this.BottomItem('♙', '我的', TabIndex.Mine)
+        ForEach(this.dockVisibleArr(), (idx: number) => {
+          this.BottomItem('', this.tabLabel(idx), idx)
+        }, (idx: number) => 'item-' + idx)
       }
       .width('100%')
       .height('100%')
       .padding({ left: 8, right: 8, top: this.padVVal(), bottom: this.padVVal() })
     }
-    .width(this.isWideScreen ? 400 : 'calc(100% - 48vp)')
+    .width(this.pillWidth())
     .height(this.barHeightVal())
     // 本分支仅 API<26 执行（26+ 走 FloatingTabsShell 槽位材质），此时 manualGlass 即兜底视觉
     .backgroundColor(MaterialManager.isSupported() ? Color.Transparent : Theme.manualGlass(this.isDark))
@@ -1069,7 +1086,7 @@ struct Index {
       color: this.isDark ? '#55000000' : '#30101824',
       offsetY: 8
     })
-    .margin({ bottom: 30 })
+    .margin({ bottom: BAR_BOTTOM_MARGIN })
     .zIndex(20)
     // 沉浸阅读补全（2026-09-29）：兜底路径（API<26）无官方玻璃，直接下沉 + 淡出 + 禁用命中
     .translate({ y: this.barContentHidden ? this.barSinkY() : 0 })
@@ -1094,7 +1111,7 @@ struct Index {
   BottomItem(icon: string, label: string, index: number) {
     Column({ space: 3 }) {
       SymbolGlyph(this.symbolFor(index))
-        .fontSize(fs(22, this.fontScale))
+        .fontSize(fs(this.isWideScreen ? 22 : 21, this.fontScale))
         .fontWeight(this.selectedTab === index ? FontWeight.Bold : FontWeight.Medium)
         .fontColor([this.selectedTab === index
           ? $r('sys.color.icon_emphasize')

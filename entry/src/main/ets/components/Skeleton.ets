@@ -17,7 +17,7 @@
  */
 
 import { LengthMetrics } from '@kit.ArkUI';
-import { Theme, Spacing, Radius, isDarkMode } from '../common/Theme';
+import { Theme, Spacing, Radius, isDarkMode, DEFAULT_CARD_RADIUS_SCALE } from '../common/Theme';
 
 /**
  * 骨架屏组件（第四批 · 首屏加载态）
@@ -35,6 +35,7 @@ import { Theme, Spacing, Radius, isDarkMode } from '../common/Theme';
  */
 @Component
 export struct ThreadCardSkeleton {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
   @Prop index: number = 0;
   /**
    * 拉伸模式（平板适配文档 §4.2 决策 11）：多列行分组下由 Flex(Stretch) 拉伸到行高，
@@ -91,7 +92,7 @@ export struct ThreadCardSkeleton {
       Column()
         .width('100%')
         .height(this.stretch ? '100%' : this.cardHeight())
-        .borderRadius(Radius.lg)
+        .borderRadius(Radius.lg * this.cardRadiusScale)
         .backgroundColor(Theme.skeletonSheet(isDarkMode()))
         .opacity(this.cardOpacity)
 
@@ -99,14 +100,14 @@ export struct ThreadCardSkeleton {
       Column()
         .width('100%')
         .height(this.stretch ? '100%' : this.cardHeight())
-        .borderRadius(Radius.lg)
+        .borderRadius(Radius.lg * this.cardRadiusScale)
         .backgroundColor(Color.White)
         .opacity(this.pulseOpacity * (isDarkMode() ? 0.10 : 0.35))
         .hitTestBehavior(HitTestMode.None)
     }
     .width('100%')
     .clip(true)
-    .borderRadius(Radius.lg)
+    .borderRadius(Radius.lg * this.cardRadiusScale)
   }
 }
 
@@ -197,6 +198,7 @@ export struct ThreadListSkeleton {
  */
 @Component
 export struct ListRowSkeleton {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
   @Prop count: number = 8;
   @StorageLink('fontScale') fontScale: number = 1.0;
 
@@ -227,7 +229,7 @@ export struct ListRowSkeleton {
         .width('100%')
         .padding({ left: Spacing.lg, right: Spacing.lg, top: 10, bottom: 10 })
         .backgroundColor(Theme.bgCard(isDarkMode()))
-        .borderRadius(Radius.lg)
+        .borderRadius(Radius.lg * this.cardRadiusScale)
       }, (i: number) => `skeleton_row_${i}`)
     }
     .width('100%')
@@ -244,6 +246,7 @@ export struct ListRowSkeleton {
  */
 @Component
 export struct ThreadDetailSkeleton {
+  @StorageLink('cardRadiusScale') cardRadiusScale: number = DEFAULT_CARD_RADIUS_SCALE;
   @State pulseOpacity: number = 0;
   @State pulseUp: boolean = true;
   @State cardOpacity: number = 0;
@@ -285,20 +288,20 @@ export struct ThreadDetailSkeleton {
       Column()
         .width('100%')
         .height(height)
-        .borderRadius(Radius.lg)
+        .borderRadius(Radius.lg * this.cardRadiusScale)
         .backgroundColor(Theme.skeletonSheet(isDarkMode()))
 
       Column()
         .width('100%')
         .height(height)
-        .borderRadius(Radius.lg)
+        .borderRadius(Radius.lg * this.cardRadiusScale)
         .backgroundColor(Color.White)
         .opacity(this.pulseOpacity * (isDarkMode() ? 0.10 : 0.35))
         .hitTestBehavior(HitTestMode.None)
     }
     .width('100%')
     .clip(true)
-    .borderRadius(Radius.lg)
+    .borderRadius(Radius.lg * this.cardRadiusScale)
   }
 
   build() {
