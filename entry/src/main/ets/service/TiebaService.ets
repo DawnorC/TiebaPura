@@ -187,6 +187,7 @@ interface ModernThreadRecord {
   first_post_content?: string;
   firstPost?: FragmentsResult;
   shareCount?: number;
+  collectCount?: number;
   create_time?: string;
   last_replyer?: string;
   topic_user_name?: string;
@@ -3330,6 +3331,7 @@ export class TiebaService {
         post_id: firstPostId ?? firstDecodedPost?.id,
         firstPost: this.buildFragmentsFromPbContent(decoded.data?.thread?.firstPostContent),
         shareCount: decoded.data?.thread?.shareNum,
+        collectCount: decoded.data?.thread?.collectNum,
         reply_num: decoded.data?.thread?.replyNum,
         forum_info: { name: decodedForumName, id: decodedForumId, avatar: decodedForumAvatar },
         agree: hasMergedAgree ? this.mapAgree(
@@ -3547,6 +3549,7 @@ export class TiebaService {
         fragments: mobile.detail.fragments ?? [],
         likeCount: mobile.detail.likeCount ?? web.detail.likeCount ?? 0,
         shareCount: mobile.detail.shareCount ?? web.detail.shareCount,
+        collectCount: mobile.detail.collectCount ?? web.detail.collectCount,
         isLiked: mobile.detail.isLiked ?? web.detail.isLiked ?? false,
         replyNum: mobile.detail.replyNum,
         createTime: mobile.detail.createTime,
@@ -3735,6 +3738,7 @@ export class TiebaService {
         0
       ),
       shareCount: thread?.shareCount,
+      collectCount: thread?.collectCount,
       // 全兼容isLiked：首楼兜底 / thread嵌套 / thread顶层独立 / agreeType → OR逻辑
       isLiked: (firstFloor?.isLiked ?? false)
         || Number(thread?.agree?.hasAgree ?? thread?.agree?.has_agree ?? 0) === 1

@@ -36,7 +36,7 @@ import { ThreadDetailResult } from '../service/TiebaService';
 import {
   Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, MaterialManager, fs, Breakpoint, isWideBarDevice,
   isLargeFoldDevice, isPuraXMaxDevice, overlayCardWidth, isWideFormDevice as detectWideFormDevice,
-  DEFAULT_CARD_RADIUS_SCALE, FLOATING_DOCK_PHONE_HEIGHT, FLOATING_DOCK_PHONE_INSET
+  DEFAULT_CARD_RADIUS_SCALE, FLOATING_DOCK_PHONE_INSET
 } from '../common/Theme';
 import { ErrorView, ThreadSharePayload, acquireImagePreloadSlot, releaseImagePreloadSlot } from '../components/CommonComponents';
 import { ThreadDetailSkeleton } from '../components/Skeleton';
@@ -98,12 +98,12 @@ const THREAD_REPLY_HEADER_HEIGHT: number = 38;
  * 只在 splitMode() 为 true（大屏横屏）时生效，手机与平板竖屏不走该分支。
  */
 const DETAIL_MAIN_WIDTH: number = 420;
-/**
- * 平板适配 §4.9 DT-J：宫格图宽度上限（vp）= 3 × 108 + 2 × 6，使每格 ≈ 108vp（手机档 94.7vp 的邻近量级）。
- * 宽屏下 Grid 若继续 width('100%')，三列会被均分到 1000+vp（每格 ≈ 320vp）而格高恒 120 → 图片被横向拉伸。
- * 手机档宫格可用宽 ≈ 296vp < 上限 → 不生效（逐像素不变，无需形态闸门）。
- */
-const DETAIL_IMAGE_GRID_MAX_WIDTH: number = 336;
+const DETAIL_REPLY_IMAGE_MAX_WIDTH: number = 336;
+const DETAIL_REPLY_IMAGE_WIDTH_RATIO: number = 0.76;
+const DETAIL_IMAGE_INITIAL_ASPECT: number = 1.5;
+const DETAIL_PORTRAIT_VIEWPORT_RATIO: number = 0.58;
+const DETAIL_DOCK_PHONE_HEIGHT: number = 44;
+const DETAIL_DOCK_WIDE_HEIGHT: number = 50;
 /**
  * 底部悬浮栏（评论输入条）平板档宽度（vp）= **400**（2026-09-16 用户拍板「底栏 = 跳转官方弹窗宽度」，
  * 横竖屏同值；原 592「现有基础宽一倍」作废；与首页 / 他人信息页底栏 400 统一口径）。
@@ -262,7 +262,7 @@ class FloorDataSource implements IDataSource {
   }
 }
 
-// 楼层/九宫格缩略图组件：网格用 200 宽缩略图。
+// 主帖和楼层共用的原比例图片组件。
 // 显示优先级：① 本地真图（ImageCache 缓存 / resolve 落地）→ ② 直连缩略图（挂载即发，快速上屏）→ ③ 灰底占位。
 // v1.20：新增阶梯延迟重试（2s + 8s）。新帖子 pic/item 路径 CDN 同步延迟可达 10~30s，
 // 首次直连被防盗链拦截 + ImageCache 候选镜像全返回 4262 占位时，
@@ -281,15 +281,28 @@ let GRID_VISIBILITY_PROBE_FIRED: boolean = false;
 const GRID_VISIBILITY_FALLBACK_MS: number = 1500;
 
 @Component
-struct ThreadGridImage {
+struct ThreadInlineImage {
   @Prop src: string = '';
   @Prop isDark: boolean = false;
+  @Prop fillFrame: boolean = false;
+  @Prop portraitHeightLimit: number = 0;
+  @State aspect: number = DETAIL_IMAGE_INITIAL_ASPECT;
   /**
    * 原图宽高比上报（2026-09-27 v2.5）：onComplete 事件自带图源原始宽高——
    * 一镜到底第一次点开（图片尚无本地缓存文件）时，宿主据此计算 Contain 矩形，
    * 让第一次也有完整 morph（此前无本地文件只能兜底直开、丢动画）。
    */
   onAspect: (aspect: number) => void = (_a: number): void => {};
+
+  private updateAspect(width: number, height: number): void {
+    if (width > 0 && height > 0) {
+      const aspect = width / height;
+      if (!this.fillFrame && this.aspect !== aspect) {
+        this.aspect = aspect;
+      }
+      this.onAspect(aspect);
+    }
+  }
   /** 本地真图（file://）—— 显示优先级最高 */
   @State current: string = '';
   /** 直连图已确认为真图（未被贴吧占位模板命中）→ 撤除遮罩 */
@@ -321,7 +334,8 @@ struct ThreadGridImage {
     try {
       await acquireImagePreloadSlot(priority);
       try {
-        local = await ImageCache.resolve(thumb);
+        const preview = await ImageCache.resolvePreview(this.src);
+        local = preview.startsWith('file://') ? preview : await ImageCache.resolve(thumb);
       } finally {
         releaseImagePreloadSlot();
       }
@@ -406,7 +420,7 @@ struct ThreadGridImage {
     }
     // Z1 同步命中（比 getCachedPath 多一道「文件大小已达灰阶校验豁免档」判定，语义是 resolve 的子集）
     // → 直接渲染本地真图，零等待
-    const cached: string | null = ImageCache.getVerifiedCachedPath(thumb);
+    const cached: string | null = ImageCache.getPreviewCachedPath(this.src);
     if (cached !== null) {
       this.resolvedLocal = true;
       this.current = cached;
@@ -417,7 +431,7 @@ struct ThreadGridImage {
     // 直连若拿到贴吧 logo 占位图，会被 build 里的遮罩挡住、不上屏（v1.23 目标不变）。
     // resolve（落地缓存 + 防盗链自愈）仍按视口门控发起 —— 它才是与接口争抢 rcp 会话的那部分，
     // 上百张同时发起会把接口拖慢（§IMGQ 要压的洪峰）；可见性回调失效时由 1.5s 安全网兜底。
-    this.directUrl = thumb;
+    this.directUrl = ImageCache.toPreviewUrl(this.src);
     setTimeout(() => {
       if (this.disposed) {
         return;
@@ -430,38 +444,34 @@ struct ThreadGridImage {
   }
 
   build() {
-    if (this.current.length > 0) {
-      // ① 本地真图（缓存命中 / resolve 成功）：优先级最高
-      Image(this.current)
-        .width('100%')
-        .height('100%')
-        .objectFit(ImageFit.Cover)
-        // 图片网格圆角 18：卡片为 26，网格单格仅约屏宽 1/3，26 显得过圆，故单独收一档；
-        // 不借用全局 Radius.md（=12）；本组件仅供本文件 ImageGrid 使用（楼主卡、楼层卡、楼中楼三处共用）
-        .borderRadius(18)
-        .alt(this.isDark ? '#2A2A2E' : '#E9E9EB')
-        .onComplete((event) => {
-          if (event && event.loadingStatus === 1 && event.width > 0 && event.height > 0) {
-            this.onAspect(event.width / event.height);
-          }
-        })
-        .onError(() => {
-          // 本地文件损坏（读不出）→ 退回「直连 + 遮罩」态并解除终态，交给阶梯重试重新解析；
-          // 重试链本身封顶两档（2s/8s），不会因此兜圈。
-          this.resolvedLocal = false;
-          this.current = '';
-          this.directUrl = resolveThumbUrl(this.src);
-          this.scheduleStaggeredRetry(this.src);
-        })
-    } else {
-      // ② 直连（快速上屏）+ ③ 灰底遮罩：直连结果只有「确认为真图」才撤遮罩
-      Stack() {
+    Stack() {
+      if (this.current.length > 0) {
+        // ① 本地真图（缓存命中 / resolve 成功）：优先级最高
+        Image(this.current)
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Contain)
+          .alt(this.isDark ? '#2A2A2E' : '#E9E9EB')
+          .onComplete((event) => {
+            if (event && event.loadingStatus === 1 && event.width > 0 && event.height > 0) {
+              this.updateAspect(event.width, event.height);
+            }
+          })
+          .onError(() => {
+            // 本地文件损坏（读不出）→ 退回「直连 + 遮罩」态并解除终态，交给阶梯重试重新解析；
+            // 重试链本身封顶两档（2s/8s），不会因此兜圈。
+            this.resolvedLocal = false;
+            this.current = '';
+            this.directUrl = ImageCache.toPreviewUrl(this.src);
+            this.scheduleStaggeredRetry(resolveThumbUrl(this.src));
+          })
+      } else {
+        // ② 直连（快速上屏）+ ③ 灰底遮罩：直连结果只有「确认为真图」才撤遮罩
         if (this.directUrl.length > 0) {
           Image(this.directUrl)
             .width('100%')
             .height('100%')
-            .objectFit(ImageFit.Cover)
-            .borderRadius(18)
+            .objectFit(ImageFit.Contain)
             .onComplete((event) => {
               if (!event || event.loadingStatus !== 1) {
                 return;
@@ -475,7 +485,7 @@ struct ThreadGridImage {
                 this.directOk = true;
                 // 真图上屏：上报原图宽高比（第一次点开无本地文件时的 morph 依据）
                 if (event.width > 0 && event.height > 0) {
-                  this.onAspect(event.width / event.height);
+                  this.updateAspect(event.width, event.height);
                 }
               }
             })
@@ -486,20 +496,22 @@ struct ThreadGridImage {
             .width('100%')
             .height('100%')
             .backgroundColor(this.isDark ? '#2A2A2E' : '#E9E9EB')
-            .borderRadius(18)
         }
       }
-      .width('100%')
-      .height('100%')
-      .onVisibleAreaChange([0.0, 1.0], (isVisible: boolean, ratio: number) => {
-        // v1.24：resolve 的视口门控挂在**始终存在**的 Stack 上 —— 不能挂在遮罩上，
-        // 否则「撤遮罩」会把门控节点一并摘掉，导致缓存永不落地
+    }
+    .width('100%')
+    .height(this.fillFrame ? '100%' : undefined)
+    .constraintSize({
+      maxWidth: !this.fillFrame && this.aspect < 1 && this.portraitHeightLimit > 0 ?
+        this.portraitHeightLimit * this.aspect : undefined
+    })
+    .aspectRatio(this.fillFrame ? undefined : this.aspect)
+    .onVisibleAreaChange([0.0, 0.01], (isVisible: boolean) => {
         GRID_VISIBILITY_PROBE_FIRED = true;
         if (isVisible) {
           this.startResolve();
         }
-      })
-    }
+    })
   }
 }
 
@@ -621,7 +633,7 @@ struct AvatarImage {
       }
       .width(this.avatarSize)
       .height(this.avatarSize)
-      .onVisibleAreaChange([0.0, 1.0], (isVisible: boolean, ratio: number) => {
+    .onVisibleAreaChange([0.0, 1.0], (isVisible: boolean) => {
         // v1.24：门控挂在始终存在的 Stack 上（撤遮罩不会摘掉门控节点）
         GRID_VISIBILITY_PROBE_FIRED = true;
         if (isVisible) {
@@ -901,12 +913,16 @@ struct ThreadDetail {
   private openingMorph: boolean = false;
   /** 打开起点：打断反向时要飞回的宫格（打断期间页面可滚动，反向时重查实时矩形） */
   private openCellNodeId: string = '';
+  private openImageUrl: string = '';
   private openStartRect: number[] | null = null;
   /**
-   * 宫格图宽高比登记（2026-09-27 v2.5）：ThreadGridImage onComplete 上报（URL → w/h）。
+   * 宫格图宽高比登记（2026-09-27 v2.5）：ThreadInlineImage onComplete 上报（URL → w/h）。
    * 第一次点开（图片无本地缓存文件）时据此计算 Contain 矩形，第一次也有完整 morph。
    */
   private gridAspectByUrl: Map<string, number> = new Map();
+  @State mainImageIndex: number = 0;
+  @State mainImageAspect: number = DETAIL_IMAGE_INITIAL_ASPECT;
+  @State mainImageWidth: number = 0;
   // ----- 关闭/打断 morph 的滚动跟随（2026-09-27 v2.3）-----
   /** 飞行容器滚动补偿量（vp）：内容滚动 delta 的反向值，让飞行图贴住目标格子 */
   @State morphFollowY: number = 0;
@@ -1139,7 +1155,12 @@ struct ThreadDetail {
     if (this.hasVisibleDetailContent(this.detail, this.floors) && !this.hasVisibleDetailContent(result.detail, result.floors)) {
       return;
     }
+    const previousImage = this.detail?.images[this.mainImageIndex];
     this.detail = result.detail;
+    if (previousImage !== result.detail.images[this.mainImageIndex]) {
+      this.mainImageIndex = Math.min(this.mainImageIndex, Math.max(0, result.detail.images.length - 1));
+      this.mainImageAspect = this.gridAspectByUrl.get(result.detail.images[this.mainImageIndex]) ?? DETAIL_IMAGE_INITIAL_ASPECT;
+    }
     // 缓存首屏显示后，用户可能已翻页。后台第 1 页刷新不能覆盖已追加的楼层和游标。
     if (this.currentPage === 1) {
       this.floors = result.floors;
@@ -2389,13 +2410,8 @@ struct ThreadDetail {
     return 30;
   }
 
-  /**
-   * 官方悬浮岛总高（vp）：仅包裹评论条；排序切换行已移出为独立悬浮胶囊层。
-   * 大折叠（2026-09-15 用户反馈横竖屏均「岛内部偏高、图标文字上下留空偏多」）收一档 66 → 62，
-   * 手机档与主界面的悬浮胶囊等高。
-   */
   private dockPillHeight(): number {
-    return this.isWideFormDevice ? (isLargeFoldDevice() ? 62 : 66) : FLOATING_DOCK_PHONE_HEIGHT;
+    return this.isWideFormDevice ? DETAIL_DOCK_WIDE_HEIGHT : DETAIL_DOCK_PHONE_HEIGHT;
   }
 
   // ===== 「帖子沉浸式阅读」交互（2026-09-18，设置 → 个性化 / AppStorage `immersiveReading`）=====
@@ -2667,11 +2683,7 @@ struct ThreadDetail {
     }
     .width('100%')
     .height('100%')
-    // 首帧垂直居中兜底（2026-09-13）：官方悬浮条槽位的首帧高度可能被系统临时算大（含安全区等），
-    // 而 Column 默认主轴 Start（顶对齐）→ 槽内内容整体顶在槽顶、偏上，且点赞/收藏/发送（42 高）
-    // 与跳转胶囊（46 高）偏移量随高度略异 → 真机表现「首帧各元素不齐，旋转一下重排后才正常」。
-    // 改为 justifyContent(Center)：**无论槽首帧多高，内容 Row(66) 始终居中于槽**，首帧即正确；
-    // 槽高正常（=66）时与顶对齐等价，手机零变化。
+    // 官方槽位可能在首帧包含额外安全区空间，评论条始终在槽位内居中。
     .justifyContent(FlexAlign.Center)
     .padding({ left: 8, right: 8 })
     // 沉浸阅读（DT-N）：内容侧下沉 + 淡出 + 禁用命中（玻璃侧错帧由 hideImmersive / showImmersive 编排）
@@ -2886,6 +2898,7 @@ struct ThreadDetail {
                   this.FooterSentinel()
                 }
                 .width('100%')
+                .padding({ left: this.replyColumns() > 1 ? Spacing.lg : 12, right: this.replyColumns() > 1 ? Spacing.lg : 12 })
                 .id('reply_section_anchor')
                 .opacity(this.floorsOpacity)
                 .renderGroup(this.floorsRevealing)
@@ -2905,7 +2918,7 @@ struct ThreadDetail {
           .height('100%')
           .scrollBar(BarState.Off)
           // 为底部悬浮回复栏留出滚动空间，最后一项可完整滚入屏幕
-          .padding({ left: this.replyColumns() > 1 ? Spacing.lg : 12, right: this.replyColumns() > 1 ? Spacing.lg : 12, top: 0, bottom: this.floatingPageBars ? this.dockPillHeight() + this.dockBottomMargin() + 12 : 8 })
+          .padding({ bottom: this.floatingPageBars ? this.dockPillHeight() + this.dockBottomMargin() + 12 : 8 })
           .edgeEffect(EdgeEffect.Spring)
           // 无感翻页：视口高采集
           .onAreaChange((_oldValue: Area, newValue: Area) => {
@@ -3002,6 +3015,7 @@ struct ThreadDetail {
         isLiked: next,
         isCollected: d.isCollected,
         createTime: d.createTime, page: d.page, totalPage: d.totalPage, shareCount: d.shareCount,
+        collectCount: d.collectCount,
         level: d.level,
       };
     }
@@ -3026,6 +3040,7 @@ struct ThreadDetail {
           isLiked: previous,
           isCollected: d.isCollected,
           createTime: d.createTime, page: d.page, totalPage: d.totalPage, shareCount: d.shareCount,
+          collectCount: d.collectCount,
           level: d.level,
         };
       }
@@ -3457,7 +3472,7 @@ struct ThreadDetail {
 
   @Builder
   PostHeader() {
-    Column({ space: Spacing.md }) {
+    Column() {
       // 官方样式·主楼头部：头像 | 昵称+等级徽章 / 时间 | 右侧「+ 关注」胶囊（已关注灰描边态）
       Row({ space: Spacing.sm }) {
         this.Avatar(this.detail!.authorAvatar ?? '', this.detail!.author, 40, this.detail!.authorId ?? '')
@@ -3505,129 +3520,137 @@ struct ThreadDetail {
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
-
-      // 帖子标题同样支持长按选中复制（无 onClick 无手势冲突，独立可选区域）；
-      // 纪元重建清选中（复制成功 → toast + title 纪元自增 → 节点重建）
-      ForEach([this.copyEpochOf('title')], (titleCopyEpoch: number) => {
-        Text(this.detail!.title)
-          .fontSize(fs(20, this.fontScale))
-          .fontWeight(FontWeight.Bold)
-          .fontColor(Theme.textPrimary(this.isDark))
-          .copyOption(CopyOptions.LocalDevice)
-          .draggable(false)
-          .width('100%')
-          .onCopy(() => { this.onTextCopied('title'); })
-      }, (titleCopyEpoch: number) => `title_${titleCopyEpoch}`)
-
-      this.RichTextContent(this.detail!.fragments ?? [], this.detail!.contentText || '（楼主未提供正文）', fs(16), Theme.textPrimary(this.isDark), 30, 'main')
+      .padding({ left: this.postHeaderInset(), right: this.postHeaderInset() })
 
       if (this.detail!.images.length > 0) {
-        // 通栏主楼：capMaxWidth=true（336 封顶防拉伸）
-        this.ImageGrid(this.detail!.images, true, false)
+        this.MainPostImages(this.detail!.images)
       }
 
-      // 官方样式·互动数据栏：分享 / 评论 / 点赞 三组均分（评论滚动定位回复区，点赞走 toggleLike）
-      Row() {
-        Row({ space: 5 }) {
-          SymbolGlyph($r('sys.symbol.share'))
-            .fontSize(fs(14, this.fontScale))
-            .fontColor([$r('sys.color.icon_secondary')])
-            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-            .hitTestBehavior(HitTestMode.None)
-          Text((this.detail?.shareCount ?? 0) > 0 ? this.formatEngagementCount(this.detail!.shareCount!) : '分享')
-            .fontSize(fs(11, this.fontScale))
-            .fontColor($r('sys.color.font_secondary'))
-            .hitTestBehavior(HitTestMode.None)
-        }
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Center)
-        .onClick(() => { this.shareThread(this.buildSharePayload()); })
+      Column({ space: Spacing.md }) {
+        // 帖子标题同样支持长按选中复制（无 onClick 无手势冲突，独立可选区域）；
+        // 纪元重建清选中（复制成功 → toast + title 纪元自增 → 节点重建）
+        ForEach([this.copyEpochOf('title')], (titleCopyEpoch: number) => {
+          Text(this.detail!.title)
+            .fontSize(fs(20, this.fontScale))
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Theme.textPrimary(this.isDark))
+            .copyOption(CopyOptions.LocalDevice)
+            .draggable(false)
+            .width('100%')
+            .onCopy(() => { this.onTextCopied('title'); })
+        }, (titleCopyEpoch: number) => `title_${titleCopyEpoch}`)
 
-        Row({ space: 5 }) {
-          SymbolGlyph($r('sys.symbol.ellipsis_message_1'))
-            .fontSize(fs(14, this.fontScale))
-            .fontColor([$r('sys.color.icon_secondary')])
-            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-            .hitTestBehavior(HitTestMode.None)
-          Text(this.formatEngagementCount(this.detail?.replyNum ?? 0))
-            .fontSize(fs(11, this.fontScale))
-            .fontColor($r('sys.color.font_secondary'))
-            .hitTestBehavior(HitTestMode.None)
-        }
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Center)
-        .onClick(() => { this.scrollToReplies(); })
+        this.RichTextContent(this.detail!.fragments ?? [], this.detail!.contentText || '（楼主未提供正文）', fs(16), Theme.textPrimary(this.isDark), 30, 'main')
 
-        Row({ space: 5 }) {
-          SymbolGlyph($r('sys.symbol.hand_thumbsup'))
-            .fontSize(fs(14, this.fontScale))
-            .fontColor([this.liked ? $r('sys.color.icon_emphasize') : $r('sys.color.icon_secondary')])
-            .renderingStrategy(SymbolRenderingStrategy.SINGLE)
-            .hitTestBehavior(HitTestMode.None)
-          Text(this.formatEngagementCount(this.detail?.likeCount ?? 0))
-            .fontSize(fs(11, this.fontScale))
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.liked ? $r('sys.color.icon_emphasize') : $r('sys.color.font_secondary'))
-            .hitTestBehavior(HitTestMode.None)
-        }
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Center)
-        .onClick(() => { this.toggleLike(); })
-      }
-      .width('100%')
-      .padding({ top: 2, bottom: 2 })
+        // 官方样式·互动数据栏：分享 / 评论 / 点赞 三组均分（评论滚动定位回复区，点赞走 toggleLike）
+        Row() {
+          Row({ space: 5 }) {
+            SymbolGlyph($r('sys.symbol.share'))
+              .fontSize(fs(14, this.fontScale))
+              .fontColor([$r('sys.color.icon_secondary')])
+              .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+              .hitTestBehavior(HitTestMode.None)
+            Text((this.detail?.shareCount ?? 0) > 0 ? this.formatEngagementCount(this.detail!.shareCount!) : '分享')
+              .fontSize(fs(11, this.fontScale))
+              .fontColor($r('sys.color.font_secondary'))
+              .hitTestBehavior(HitTestMode.None)
+          }
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
+          .onClick(() => { this.shareThread(this.buildSharePayload()); })
 
-      // 官方样式·吧信息卡：浅蓝横条（吧头像 + 吧名 + 进吧），与官方详情页同位（互动栏下方、回复区上方）
-      Row({ space: Spacing.sm }) {
-        Stack() {
-          Text((this.detail!.forumName || this.forumName || '吧').substring(0, 1))
-            .width(36)
-            .height(36)
-            .fontSize(15)
-            .fontColor(Color.White)
-            .textAlign(TextAlign.Center)
-            .backgroundColor(Theme.brand())
-            .borderRadius(Radius.full)
-          if ((this.detail?.forumAvatar ?? '').trim().length > 0) {
-            Image(this.detail!.forumAvatar!.trim())
+          Row({ space: 5 }) {
+            SymbolGlyph($r('sys.symbol.ellipsis_message_1'))
+              .fontSize(fs(14, this.fontScale))
+              .fontColor([$r('sys.color.icon_secondary')])
+              .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+              .hitTestBehavior(HitTestMode.None)
+            Text(this.formatEngagementCount(this.detail?.replyNum ?? 0))
+              .fontSize(fs(11, this.fontScale))
+              .fontColor($r('sys.color.font_secondary'))
+              .hitTestBehavior(HitTestMode.None)
+          }
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
+          .onClick(() => { this.scrollToReplies(); })
+
+          Row({ space: 5 }) {
+            SymbolGlyph($r('sys.symbol.hand_thumbsup'))
+              .fontSize(fs(14, this.fontScale))
+              .fontColor([this.liked ? $r('sys.color.icon_emphasize') : $r('sys.color.icon_secondary')])
+              .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+              .hitTestBehavior(HitTestMode.None)
+            Text(this.formatEngagementCount(this.detail?.likeCount ?? 0))
+              .fontSize(fs(11, this.fontScale))
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.liked ? $r('sys.color.icon_emphasize') : $r('sys.color.font_secondary'))
+              .hitTestBehavior(HitTestMode.None)
+          }
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
+          .onClick(() => { this.toggleLike(); })
+        }
+        .width('100%')
+        .padding({ top: 2, bottom: 2 })
+
+        // 官方样式·吧信息卡：浅蓝横条（吧头像 + 吧名 + 进吧），与官方详情页同位（互动栏下方、回复区上方）
+        Row({ space: Spacing.sm }) {
+          Stack() {
+            Text((this.detail!.forumName || this.forumName || '吧').substring(0, 1))
               .width(36)
               .height(36)
+              .fontSize(15)
+              .fontColor(Color.White)
+              .textAlign(TextAlign.Center)
+              .backgroundColor(Theme.brand())
               .borderRadius(Radius.full)
-              .objectFit(ImageFit.Cover)
-              .clip(true)
+            if ((this.detail?.forumAvatar ?? '').trim().length > 0) {
+              Image(this.detail!.forumAvatar!.trim())
+                .width(36)
+                .height(36)
+                .borderRadius(Radius.full)
+                .objectFit(ImageFit.Cover)
+                .clip(true)
+            }
           }
+          .width(36)
+          .height(36)
+          Text(`${this.detail!.forumName || this.forumName}吧`)
+            .fontSize(fs(14, this.fontScale))
+            .fontWeight(FontWeight.Medium)
+            .fontColor(Theme.textPrimary(this.isDark))
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+          Button('进吧')
+            .fontSize(fs(12, this.fontScale))
+            .fontColor(Color.White)
+            .fontWeight(FontWeight.Medium)
+            .backgroundColor(Theme.brand())
+            .height(30)
+            .padding({ left: 14, right: 14 })
+            .borderRadius(Radius.full)
+            .onClick(() => { this.openForumHome(); })
         }
-        .width(36)
-        .height(36)
-        Text(`${this.detail!.forumName || this.forumName}吧`)
-          .fontSize(fs(14, this.fontScale))
-          .fontWeight(FontWeight.Medium)
-          .fontColor(Theme.textPrimary(this.isDark))
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-        Button('进吧')
-          .fontSize(fs(12, this.fontScale))
-          .fontColor(Color.White)
-          .fontWeight(FontWeight.Medium)
-          .backgroundColor(Theme.brand())
-          .height(30)
-          .padding({ left: 14, right: 14 })
-          .borderRadius(Radius.full)
-          .onClick(() => { this.openForumHome(); })
+        .width('100%')
+        .padding({ left: Spacing.md, right: Spacing.md, top: 10, bottom: 10 })
+        .backgroundColor(this.isDark ? '#17222E' : '#EBF3FC')
+        .borderRadius(Radius.md * this.cardRadiusScale)
       }
       .width('100%')
-      .padding({ left: Spacing.md, right: Spacing.md, top: 10, bottom: 10 })
-      .backgroundColor(this.isDark ? '#17222E' : '#EBF3FC')
-      .borderRadius(Radius.md * this.cardRadiusScale)
+      .padding({ left: this.postHeaderInset(), right: this.postHeaderInset(), top: Spacing.md })
     }
     .width('100%')
-    // 官方样式（2026-11-10）：主楼去卡片化，直接铺在页面白底上（横向留白由外层 Scroll padding 提供）；
-    // 多列瀑布流档（灰底）保留卡片观感，与右栏楼层卡一致。
-    .padding(this.replyColumns() > 1 ? Spacing.lg : 0)
+    .padding(this.replyColumns() > 1 ?
+      { left: this.isSplit ? Spacing.lg : Spacing.lg * 2, right: this.isSplit ? Spacing.lg : Spacing.lg * 2,
+        top: Spacing.lg, bottom: Spacing.lg } : 0)
     .backgroundColor(this.replyColumns() > 1 ? Theme.bgCard(this.isDark) : Color.Transparent)
     .borderRadius(this.replyColumns() > 1 ? 26 * this.cardRadiusScale : 0)
     .alignItems(HorizontalAlign.Start)
+  }
+
+  private postHeaderInset(): number {
+    return !this.isSplit && this.replyColumns() === 1 ? 12 : 0;
   }
 
   @Builder
@@ -3780,7 +3803,7 @@ struct ThreadDetail {
   /**
    * 楼层卡估算高（vp，仅供列均衡分桶，不求像素准只求相对准）：
    * 头部 / 底部 / 卡内留白取常数 128；正文 = 行数 × 26（行高）+ 8（每行字数 ≈ 列宽 / 16 字号）；
-   * 图片宫格 = 显式总高（行 × 格高〔gridCellHeight()〕+ 间隙，与渲染同式）；楼中楼预览条 40。
+   * 图片按已知比例估算纵向总高；楼中楼预览另计。
    * 各卡共享同一底数，常数误差在「列高差」里互相抵消。
    */
   private estimateFloorCardHeight(floor: FloorItem, colWidth: number): number {
@@ -3790,9 +3813,10 @@ struct ThreadDetail {
       const charsPerLine: number = Math.max(8, Math.floor(colWidth / 16));
       h += Math.min(Math.ceil(text.length / charsPerLine), 20) * 26 + 8;
     }
-    const imgRows: number = Math.ceil((floor.images ?? []).length / 3);
-    if (imgRows > 0) {
-      h += imgRows * this.gridCellHeight() + (imgRows - 1) * 6 + 12;
+    const imageWidth = Math.min(DETAIL_REPLY_IMAGE_MAX_WIDTH, Math.max(1, colWidth - 44) * DETAIL_REPLY_IMAGE_WIDTH_RATIO);
+    for (const url of floor.images ?? []) {
+      const aspect = this.gridAspectByUrl.get(url) ?? DETAIL_IMAGE_INITIAL_ASPECT;
+      h += this.inlineImageHeight(imageWidth, aspect) + 10;
     }
     if ((floor.comments ?? []).length > 0 || (floor.commentsTotal ?? 0) > 0) {
       // 楼中楼区估算高度：链接态 40→22、无链接态 40→22（容器 bottom 0 + 末条评论 bottom 0），同步校准跳楼定位预估
@@ -3908,7 +3932,7 @@ struct ThreadDetail {
             Theme.textPrimary(this.isDark), fs(23, this.fontScale), 'floor_' + floor.floorId)
         }
         if (floor.images.length > 0) {
-          this.ImageGrid(floor.images, true, false)
+          this.FloorImages(floor)
         }
         Row({ space: 7 }) {
           Text((floor.floor > 0 ? '第' + floor.floor + '楼 ' : '') + this.formatFloorTime(floor.createTime) +
@@ -4095,11 +4119,7 @@ struct ThreadDetail {
     });
   }
 
-  /**
-   * 主图预览列表（2026-09-20 预览解耦）：只含主楼 + 楼层图片，**不再收集楼中楼（comments）图片**。
-   * 楼中楼图片预览独立：宫格点击走单张预览（见 ImageGrid 的 singlePreview 分支），
-   * 左右滑动不会再切进楼中楼图片。ImagePreview 流式补页的 extractStreamImages 同步只收楼层图。
-   */
+  /** 全屏预览按主帖、楼层顺序组织图片，楼中楼面板独立管理自己的预览。 */
   private collectAllImages(): string[] {
     const all: string[] = [];
     if (this.detail && this.detail.images && this.detail.images.length > 0) {
@@ -4113,57 +4133,23 @@ struct ThreadDetail {
     return all;
   }
 
-  private getImageGlobalOffset(localImages: string[]): number {
-    const all = this.collectAllImages();
-    if (localImages.length === 0) return 0;
-    const firstUrl = localImages[0];
-    const idx = all.indexOf(firstUrl);
-    return idx >= 0 ? idx : 0;
+  private inlineImageNodeId(group: string, index: number): string {
+    return `thread_image_${group}_${index}`;
   }
 
-  /**
-   * 图片宫格（真机错位修复 2026-09-13）：`Grid` 是**可滚动容器**，嵌在 `WaterFlow.FlowItem` 内时
-   * 「自测量高度」与「实际渲染高度」可能不一致（格高恒 120 但总高靠 Grid 自算），布局期用错高度
-   * 会把后续 FlowItem 摆错位置 → 卡片重叠（竖屏）/ 列溢出（横屏），真机已复现。
-   * 故**显式给出总高** = 行数 × 格高〔`gridCellHeight()`：手机/平板 120、大折叠与 Pura X Max 72〕
-   * + (行数 − 1) × 6，测量期即终值，与首页 ThreadCard
-   * 「图片尺寸测量期确定」的成品口径对齐。
-   * `capMaxWidth`：仅**通栏卡**（主楼）传 true（336 封顶防通栏拉伸）；列内卡（楼层 / 楼中楼）传 false
-   * —— 窄列下列宽本就 < 336，写死 336 上限没有意义，跟随列宽（'100%'）杜绝交叉轴测量歧义。
-   * `singlePreview`（2026-09-20 预览解耦）：true = 楼中楼宫格，点开**单张预览**
-   * （urls 只传当前这张、不带流式补页上下文，左右滑不切图）；false = 主图/楼层宫格，
-   * 走全局列表 + 流式补页（原行为）。
-   */
-  /**
-   * 宫格单格高（vp）：大折叠（2026-09-16 用户反馈竖横屏宫格图片拉伸）分栏后格宽骤降——
-   * 三分屏下主楼/楼层卡内容宽 ~150-240，3 列每格仅 ~50-75vp，格高恒 120 会把图拉成细条；
-   * 收至 72（竖屏 55/72≈0.76、横屏 75/72≈1.04，与手机档 94.7/120≈0.79 比例同档）。
-   * 其它形态维持 120 逐像素不变。微调点唯一（此常量）。
-   */
-  private gridCellHeight(): number {
-    // Pura X Max（阔折叠展开）与大折叠同口径：分栏 W/3 + 回复 2 列后格宽骤降，72 防拉伸
-    return (isLargeFoldDevice() || isPuraXMaxDevice()) ? 72 : 120;
-  }
-
-  // ===== 一镜到底图片预览（2026-09-27 v2 自绘飞行层方案）=====
-
-  /**
-   * 宫格飞行定位 id（2026-09-27 v2.4）：`dtgu_${URL哈希}` —— 按点击图自身 URL 生成，
-   * 不再经「首图 URL 推全局偏移」（首图不在全局列表/首图重复时会整组错位：飞行起点
-   * 飞到别的格子、预览 index 指向全局第 0 张）。楼中楼单张同样参与（id 唯一即可）。
-   * 同 URL 重复入列表时哈希撞车取首个格子，可接受。
-   */
-  private gridCellNodeId(images: string[], idx: number): string {
-    return `dtgu_${this.urlHash(images[idx] ?? '')}`;
-  }
-
-  /** djb2 字符串哈希（base36）：同一 URL 稳定、不同 URL 基本不撞 */
-  private urlHash(url: string): string {
-    let h: number = 5381;
-    for (let i = 0; i < url.length; i++) {
-      h = ((h << 5) + h + url.charCodeAt(i)) | 0;
+  private previewImageNodeId(index: number): string {
+    const mainCount = this.detail?.images.length ?? 0;
+    if (index < mainCount) {
+      return index === this.mainImageIndex ? this.inlineImageNodeId('main', index) : '';
     }
-    return (h >>> 0).toString(36);
+    let offset = mainCount;
+    for (const floor of this.floors) {
+      if (index < offset + floor.images.length) {
+        return this.inlineImageNodeId(floor.floorId, index - offset);
+      }
+      offset += floor.images.length;
+    }
+    return '';
   }
 
   /** 查组件窗口矩形（vp）。componentUtils 返回 px，统一转 vp；查不到/尺寸非法返回 null */
@@ -4205,13 +4191,19 @@ struct ThreadDetail {
   private containRectFor(aspect: number): number[] {
     const winW = this.currentWidth > 0 ? this.currentWidth : 360;
     const winH = this.pageHeight > 0 ? this.pageHeight : 780;
-    let w = winW;
-    let h = w / aspect;
-    if (h > winH) {
-      h = winH;
-      w = h * aspect;
-    }
-    return [(winW - w) / 2, (winH - h) / 2, w, h];
+    return this.fitImageInRect([0, 0, winW, winH], aspect);
+  }
+
+  private fitImageInRect(rect: number[], aspect: number): number[] {
+    const width = Math.min(rect[2], rect[3] * aspect);
+    const height = width / aspect;
+    return [rect[0] + (rect[2] - width) / 2, rect[1] + (rect[3] - height) / 2, width, height];
+  }
+
+  private getInlineImageRect(nodeId: string, url: string): number[] | null {
+    const rect = this.getVpRectById(nodeId);
+    const aspect = this.gridAspectByUrl.get(url) ?? 0;
+    return rect !== null && aspect > 0 ? this.fitImageInRect(rect, aspect) : rect;
   }
 
   /**
@@ -4224,11 +4216,12 @@ struct ThreadDetail {
     this.previewParams = params;
     this.previewClosing = false;
     this.openCellNodeId = cellNodeId;
+    this.openImageUrl = url;
     this.openStartRect = null;
     this.openingMorph = true;
     // 打开方向目标是屏幕固定位置，不做滚动跟随，清掉上一次的补偿残留
     this.morphFollowY = 0;
-    const rect = this.getVpRectById(cellNodeId);
+    const rect = this.getInlineImageRect(cellNodeId, url);
     if (rect === null) {
       // 兜底直开：清掉上一次 morph 的交接位图，否则预览首帧会闪出上一张旧图
       this.openingMorph = false;
@@ -4253,7 +4246,7 @@ struct ThreadDetail {
       const epoch = ++this.morphEpoch;
       const target = this.containRectFor(aspect);
       this.morphPixelMap = null;
-      this.morphSrc = resolveThumbUrl(url);
+      this.morphSrc = ImageCache.toPreviewUrl(url);
       this.morphX = rect[0];
       this.morphY = rect[1];
       this.morphW = rect[2];
@@ -4362,7 +4355,7 @@ struct ThreadDetail {
       return;
     }
     const epoch = ++this.morphEpoch;
-    const rect = this.getVpRectById(this.openCellNodeId) ?? this.openStartRect;
+    const rect = this.getInlineImageRect(this.openCellNodeId, this.openImageUrl) ?? this.openStartRect;
     if (rect === null) {
       this.morphOverlayShow = false;
       return;
@@ -4412,7 +4405,7 @@ struct ThreadDetail {
     const urls: string[] = Array.isArray(urlsObj) ? (urlsObj as string[]) : [];
     const url: string = index >= 0 && index < urls.length ? urls[index] : '';
     const local = url.length > 0 ? this.getMorphLocalPath(url) : null;
-    const rect = url.length > 0 ? this.getVpRectById(this.gridCellNodeId([url], 0)) : null;
+    const rect = url.length > 0 ? this.getInlineImageRect(this.previewImageNodeId(index), url) : null;
     if (local === null || rect === null) {
       this.previewShow = false;
       return;
@@ -4465,81 +4458,142 @@ struct ThreadDetail {
     });
   }
 
-  @Builder
-  ImageGrid(images: string[], capMaxWidth: boolean = true, singlePreview: boolean = false) {
-    Grid() {
-      ForEach(images, (img: string, idx: number) => {
-        GridItem() {
-          Stack() {
-            ThreadGridImage({
-              src: img,
-              isDark: this.isDark,
-              onAspect: (aspect: number): void => {
-                if (aspect > 0) {
-                  this.gridAspectByUrl.set(img, aspect);
-                }
-              }
-            })
-              .width('100%')
-              .height(this.gridCellHeight())
-          }
-          .width('100%')
-          .height(this.gridCellHeight())
-          // 一镜到底 v2.4（2026-09-27）：格子挂 URL 哈希定位 id，点击时/关闭时由
-          // componentUtils 查实时矩形作为飞行起/终点（px→vp 换算见 getVpRectById）。
-          .id(this.gridCellNodeId(images, idx))
-          .onClick(() => {
-            // 预览提速 P3（2026-09-23）：点击即拉——打开预览前先把点击图的基础档
-            // 灌进 ImageCache（闸门 priority=1 插队），模态转场动画期间下载已在并行进行；
-            // 预览首图同步直出/高清升级都吃这条在途链。已在缓存则 warmImages 自动跳过。
-            ImageCache.warmImages([img], 1, 1);
-            // 高清档入口并行（2026-09-26）：点击目标图的 720 档随转场动画同步起跑，
-            // 进预览首图的高清升级已在中途——治「原图加载慢」的第一棒；
-            // pv_ 已在缓存时 resolvePreview 内部直接命中返回，零重复下载
-            ImageCache.resolvePreview(img).catch((): void => {});
-            // 楼中楼宫格（singlePreview=true）：单张预览——urls 只含当前这张（单元素 Swiper 不可滑），
-            // 不带流式补页上下文；v2.4 起同样参与一镜到底（URL 哈希定位）。
-            if (singlePreview) {
-              const singleParams: Record<string, Object> = { 'urls': [img] };
-              this.openImagePreview(singleParams, this.gridCellNodeId(images, idx), img);
-              return;
-            }
-            const allImages = this.collectAllImages();
-            // 预览 index = 点击图自身在全局列表的精确位置（v2.4：不再用首图 URL 推偏移，
-            // 首图不在列表/重复时会把整组映射错到全局第 0 张）
-            let globalIdx: number = allImages.indexOf(img);
-            if (globalIdx < 0) {
-              globalIdx = this.getImageGlobalOffset(images) + idx;
-            }
-            // 图片流式补页（2026-09-17）：预览滑到已加载图片末尾时，会按同一组分页参数
-            // （tid/sortType/seeLz/forumId/commentRn）继续拉取后续楼层页并追加图片，
-            // 使「未加载楼层的图片」也能直接滑到，无需先滚回列表加载楼层。
-            // loadedPage/totalPage 用于给出补页游标与上限（详见 ImagePreview.ets 的流式补页说明）。
-            const previewParams: Record<string, Object> = {
-              'urls': allImages,
-              'index': globalIdx,
-              'tid': this.tid,
-              'sortType': this.sortType,
-              'seeLz': this.seeLz,
-              'forumId': this.forumId,
-              'commentRn': this.commentRn,
-              'loadedPage': this.currentPage,
-              'totalPage': this.totalFloorPage
-            };
-            this.openImagePreview(previewParams, this.gridCellNodeId(images, idx), img);
-          })
+  private openInlineImage(url: string, group: string, index: number): void {
+    const allImages = this.collectAllImages();
+    let previewIndex = index;
+    if (group !== 'main') {
+      previewIndex += this.detail?.images.length ?? 0;
+      for (const floor of this.floors) {
+        if (floor.floorId === group) {
+          break;
         }
-      }, (img: string, idx: number) => img)
+        previewIndex += floor.images.length;
+      }
     }
-    .columnsTemplate('1fr 1fr 1fr')
-    .columnsGap(6)
-    .rowsGap(6)
+    ImageCache.warmImages([url], 1, 1);
+    ImageCache.resolvePreview(url).catch((): void => {});
+    const params: Record<string, Object> = {
+      'urls': allImages,
+      'index': previewIndex,
+      'tid': this.tid,
+      'sortType': this.sortType,
+      'seeLz': this.seeLz,
+      'forumId': this.forumId,
+      'commentRn': this.commentRn,
+      'loadedPage': this.currentPage,
+      'totalPage': this.totalFloorPage
+    };
+    this.openImagePreview(params, this.inlineImageNodeId(group, index), url);
+  }
+
+  private recordMainImageAspect(url: string, aspect: number): void {
+    this.gridAspectByUrl.set(url, aspect);
+    if (this.detail?.images[this.mainImageIndex] === url) {
+      this.mainImageAspect = aspect;
+    }
+  }
+
+  private portraitImageHeightLimit(): number {
+    return this.pageHeight * DETAIL_PORTRAIT_VIEWPORT_RATIO;
+  }
+
+  private inlineImageHeight(width: number, aspect: number): number {
+    const naturalHeight = width / aspect;
+    return aspect < 1 ? Math.min(naturalHeight, this.portraitImageHeightLimit()) : naturalHeight;
+  }
+
+  @Builder
+  MainPostImages(images: string[]) {
+    Column() {
+      Stack({ alignContent: Alignment.BottomEnd }) {
+        Swiper() {
+          ForEach(images, (url: string, index: number) => {
+            ThreadInlineImage({
+              src: url,
+              isDark: this.isDark,
+              fillFrame: true,
+              onAspect: (aspect: number): void => { this.recordMainImageAspect(url, aspect); }
+            })
+              .id(this.inlineImageNodeId('main', index))
+              .accessibilityText(`查看主帖图片 ${index + 1}`)
+              .onClick(() => { this.openInlineImage(url, 'main', index); })
+          }, (url: string, index: number): string => `${index}:${url}`)
+        }
+        .width('100%')
+        .height('100%')
+        .id('thread_main_image_swiper')
+        .index(this.mainImageIndex)
+        .loop(false)
+        .autoPlay(false)
+        .indicator(false)
+        .disableSwipe(images.length <= 1)
+        .cachedCount(1)
+        .onChange((index: number) => {
+          this.mainImageIndex = index;
+          this.mainImageAspect = this.gridAspectByUrl.get(images[index]) ?? DETAIL_IMAGE_INITIAL_ASPECT;
+        })
+
+        if (images.length > 1) {
+          Text(`${this.mainImageIndex + 1}/${images.length}`)
+            .id('thread_main_image_count')
+            .fontSize(12)
+            .fontColor(Color.White)
+            .backgroundColor('#B8000000')
+            .borderRadius(Radius.full)
+            .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+            .margin({ right: 16, bottom: 8 })
+            .hitTestBehavior(HitTestMode.None)
+        }
+      }
+      .width('100%')
+      .height(this.inlineImageHeight(this.mainImageWidth || this.currentWidth, this.mainImageAspect))
+
+      if (images.length > 1) {
+        Flex({ justifyContent: FlexAlign.Center, wrap: FlexWrap.Wrap }) {
+          ForEach(images, (url: string, index: number) => {
+            Circle()
+              .width(6)
+              .height(6)
+              .fill(index === this.mainImageIndex ? Theme.brand() : Theme.divider(this.isDark))
+              .margin({ left: 3, right: 3, top: 2, bottom: 2 })
+          }, (url: string, index: number): string => `${index}:${url}`)
+        }
+        .width('100%')
+        .id('thread_main_image_dots')
+        .margin({ top: 5 })
+      }
+    }
     .width('100%')
-    // 显式总高（错位修复）：行数 × 格高 + 行间隙，消除 FlowItem 内 Grid 自测量的不确定性
-    .height(Math.ceil(images.length / 3) * this.gridCellHeight() + (Math.ceil(images.length / 3) - 1) * 6)
-    // §4.9 DT-J：通栏卡限宽 336 防三列被均分到 1000+vp（每格 ≈ 320vp）而格高恒 120 → 图片横向拉伸。
-    // 列内卡（capMaxWidth=false）跟随列宽 '100%'；手机档通栏可用宽 ≈ 296vp < 336 → 封顶不生效（逐像素不变）。
-    .constraintSize({ maxWidth: capMaxWidth ? DETAIL_IMAGE_GRID_MAX_WIDTH : '100%' })
+    .margin({ top: Spacing.md })
+    .onAreaChange((_old: Area, area: Area) => {
+      const width = area.width as number;
+      if (width > 0 && width !== this.mainImageWidth) {
+        this.mainImageWidth = width;
+      }
+    })
+  }
+
+  @Builder
+  FloorImages(floor: FloorItem) {
+    Column({ space: 10 }) {
+      ForEach(floor.images, (url: string, index: number) => {
+        ThreadInlineImage({
+          src: url,
+          isDark: this.isDark,
+          portraitHeightLimit: this.portraitImageHeightLimit(),
+          onAspect: (aspect: number): void => { this.gridAspectByUrl.set(url, aspect); }
+        })
+          .id(this.inlineImageNodeId(floor.floorId, index))
+          .accessibilityText(`查看楼层图片 ${index + 1}`)
+          .borderRadius(8)
+          .clip(true)
+          .onClick(() => { this.openInlineImage(url, floor.floorId, index); })
+      }, (url: string, index: number): string => `${index}:${url}`)
+    }
+    .width(`${DETAIL_REPLY_IMAGE_WIDTH_RATIO * 100}%`)
+    .constraintSize({ maxWidth: DETAIL_REPLY_IMAGE_MAX_WIDTH })
+    .alignItems(HorizontalAlign.Start)
+    .id('thread_floor_images_' + floor.floorId)
   }
 
   // 提取唯一表情URL集合（给隐藏预取Image跑onComplete/onError用）
@@ -5059,6 +5113,20 @@ struct ThreadDetail {
 
 
   @Builder
+  CommentBarIcon(symbol: Resource, color: ResourceColor, nodeId: string) {
+    Row() {
+      SymbolGlyph(symbol)
+        .fontSize(this.floatingPageBars ? 18 : 20)
+        .fontColor([color])
+        .id(nodeId)
+    }
+    .width('100%')
+    .height(this.floatingPageBars ? 20 : undefined)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
   CommentBar(inIsland: boolean) {
     Row({ space: 4 }) {
       Row() {
@@ -5071,48 +5139,52 @@ struct ThreadDetail {
       .layoutWeight(1)
       .height(34)
       .padding({ left: 10, right: 8 })
+      .alignItems(VerticalAlign.Center)
       .id('thread_reply_entry')
       .accessibilityText('回复帖子')
       .enabled(!this.sending && this.detail !== null)
       .onClick(() => { this.openReplyEditor(); })
 
       Column({ space: 1 }) {
-        SymbolGlyph($r('sys.symbol.ellipsis_message_1'))
-          .fontSize(20)
-          .fontColor([$r('sys.color.icon_primary')])
+        this.CommentBarIcon($r('sys.symbol.ellipsis_message_1'), $r('sys.color.icon_primary'), 'thread_reply_icon')
         Text(this.formatEngagementCount(this.detail?.replyNum ?? 0))
           .fontSize(fs(10, this.fontScale))
           .fontColor(Theme.textSecondary(this.isDark))
       }
       .width(39)
-      .height(40)
+      .height(this.floatingPageBars ? '100%' : 40)
       .justifyContent(FlexAlign.Center)
       .id('thread_reply_jump')
       .accessibilityText('查看全部回复')
       .onClick(() => { this.scrollToReplies(); })
 
       Column({ space: 1 }) {
-        SymbolGlyph($r('sys.symbol.hand_thumbsup'))
-          .fontSize(20)
-          .fontColor([this.liked ? Theme.brand() : $r('sys.color.icon_primary')])
+        this.CommentBarIcon($r('sys.symbol.hand_thumbsup'),
+          this.liked ? Theme.brand() : $r('sys.color.icon_primary'), 'thread_like_icon')
         Text(this.formatEngagementCount(this.detail?.likeCount ?? 0))
           .fontSize(fs(10, this.fontScale))
           .fontColor(this.liked ? Theme.brand() : Theme.textSecondary(this.isDark))
       }
       .width(39)
-      .height(40)
+      .height(this.floatingPageBars ? '100%' : 40)
       .justifyContent(FlexAlign.Center)
       .id('thread_like')
       .accessibilityText(this.liked ? '取消点赞' : '点赞')
       .onClick(() => { this.toggleLike(); })
 
-      Column() {
-        SymbolGlyph($r('sys.symbol.star'))
-          .fontSize(20)
-          .fontColor([this.collected ? Theme.brand() : $r('sys.color.icon_primary')])
+      Column({ space: 1 }) {
+        this.CommentBarIcon($r('sys.symbol.star'),
+          this.collected ? Theme.brand() : $r('sys.color.icon_primary'), 'thread_collect_icon')
+        if (this.floatingPageBars || this.detail?.collectCount !== undefined) {
+          Text(this.formatEngagementCount(this.detail?.collectCount ?? 0))
+            .id('thread_collect_count')
+            .fontSize(fs(10, this.fontScale))
+            .fontColor(this.collected ? Theme.brand() : Theme.textSecondary(this.isDark))
+            .visibility(this.detail?.collectCount === undefined ? Visibility.Hidden : Visibility.Visible)
+        }
       }
       .width(39)
-      .height(40)
+      .height(this.floatingPageBars ? '100%' : 40)
       .justifyContent(FlexAlign.Center)
       .id('thread_collect')
       .accessibilityText(this.collected ? '取消收藏，长按收藏并归类' : '收藏，长按收藏并归类')
@@ -5124,8 +5196,9 @@ struct ThreadDetail {
         .onAction(() => { this.openCategoryPicker(); }))
     }
     .width(this.floatingPageBars && !inIsland ? this.dockPillWidth() : '100%')
-    .height(this.floatingPageBars ? this.dockPillHeight() : THREAD_DETAIL_FIXED_BAR_HEIGHT)
-    .padding({ left: inIsland ? 1 : 12, right: inIsland ? 1 : 8, bottom: inIsland ? (this.isWideFormDevice ? 8 : 2) : 0 })
+    .height(inIsland ? '100%' : (this.floatingPageBars ? this.dockPillHeight() : THREAD_DETAIL_FIXED_BAR_HEIGHT))
+    .id('thread_comment_bar')
+    .padding({ left: inIsland ? 1 : 12, right: inIsland ? 1 : 8 })
     .alignItems(VerticalAlign.Center)
     .backgroundColor(this.floatingPageBars
       ? (inIsland ? Color.Transparent : Theme.segGlass(this.isDark, false))

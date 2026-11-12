@@ -332,6 +332,7 @@ export interface ThreadInfoMessage {
   firstPostId?: number;
   createTime?: number;
   collectStatus?: number;
+  collectNum?: number;
   collectMarkPid?: string;
   postId?: number;
   isMemberTop?: number;

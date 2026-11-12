@@ -86,6 +86,7 @@ export interface ThreadDetail {
   replyNum: number;
   likeCount?: number;
   shareCount?: number;
+  collectCount?: number;
   isLiked?: boolean;
   isCollected?: boolean;
   createTime: string;

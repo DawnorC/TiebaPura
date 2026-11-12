@@ -489,6 +489,7 @@ export class TiebaProtoDecoder {
         else if (tag.fieldNumber === 175) result.tabId = value;
         else if (tag.fieldNumber === 181) result.isDeleted = value;
         else if (tag.fieldNumber === 182) result.hotNum = value;
+        else if (tag.fieldNumber === 190) result.collectNum = value;
       } else reader.skip(tag.wireType);
     }
     return result;
