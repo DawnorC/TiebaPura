@@ -285,6 +285,7 @@ struct ThreadInlineImage {
   @Prop src: string = '';
   @Prop isDark: boolean = false;
   @Prop fillFrame: boolean = false;
+  @Prop preloadPriority: number = 0;
   @Prop portraitHeightLimit: number = 0;
   @State aspect: number = DETAIL_IMAGE_INITIAL_ASPECT;
   /**
@@ -334,6 +335,9 @@ struct ThreadInlineImage {
     try {
       await acquireImagePreloadSlot(priority);
       try {
+        if (this.disposed) {
+          return false;
+        }
         const preview = await ImageCache.resolvePreview(this.src);
         local = preview.startsWith('file://') ? preview : await ImageCache.resolve(thumb);
       } finally {
@@ -351,7 +355,7 @@ struct ThreadInlineImage {
     // （tick → attemptResolve 首行即 return），首次进帖永不恢复。
     // 返回重进时 aboutToAppear 走 getCachedPath 命中，才「正常」。
     // 现在只认「拿到本地文件」为终态，直连失败不再阻断解析结果落地。
-    if (local.length > 0 && local !== thumb) {
+    if (!this.disposed && local.length > 0 && local !== thumb) {
       this.resolvedLocal = true;
       this.current = local;
       return true;
@@ -372,7 +376,12 @@ struct ThreadInlineImage {
       return;
     }
     this.started = true;
-    this.attemptResolve(resolveThumbUrl(this.src), priority).catch(() => { /* 失败由阶梯重试兜底 */ });
+    const thumb = resolveThumbUrl(this.src);
+    this.attemptResolve(thumb, priority).then((ok: boolean) => {
+      if (!ok && this.fillFrame && !this.disposed) {
+        this.scheduleStaggeredRetry(thumb);
+      }
+    }).catch(() => {});
   }
 
   private scheduleStaggeredRetry(url: string): void {
@@ -432,6 +441,11 @@ struct ThreadInlineImage {
     // resolve（落地缓存 + 防盗链自愈）仍按视口门控发起 —— 它才是与接口争抢 rcp 会话的那部分，
     // 上百张同时发起会把接口拖慢（§IMGQ 要压的洪峰）；可见性回调失效时由 1.5s 安全网兜底。
     this.directUrl = ImageCache.toPreviewUrl(this.src);
+    if (this.fillFrame) {
+      this.current = ImageCache.getVerifiedCachedPath(thumb) ?? '';
+      this.startResolve(this.preloadPriority);
+      return;
+    }
     setTimeout(() => {
       if (this.disposed) {
         return;
@@ -921,6 +935,7 @@ struct ThreadDetail {
    */
   private gridAspectByUrl: Map<string, number> = new Map();
   @State mainImageIndex: number = 0;
+  @State mainImageIndicatorIndex: number = 0;
   @State mainImageFrameAspect: number = DETAIL_IMAGE_INITIAL_ASPECT;
   @State mainImageWidth: number = 0;
   private mainImageFrameTid: string = '';
@@ -1164,8 +1179,10 @@ struct ThreadDetail {
       this.mainImageFrameAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : DETAIL_IMAGE_INITIAL_ASPECT;
       this.mainImageFrameTid = result.detail.tid;
       this.mainImageIndex = 0;
+      this.mainImageIndicatorIndex = 0;
     }
     this.mainImageIndex = Math.min(this.mainImageIndex, Math.max(0, images.length - 1));
+    this.mainImageIndicatorIndex = Math.min(this.mainImageIndicatorIndex, Math.max(0, images.length - 1));
     this.detail = result.detail;
     // 缓存首屏显示后，用户可能已翻页。后台第 1 页刷新不能覆盖已追加的楼层和游标。
     if (this.currentPage === 1) {
@@ -4507,12 +4524,20 @@ struct ThreadDetail {
       Stack({ alignContent: Alignment.BottomEnd }) {
         Swiper() {
           ForEach(images, (url: string, index: number) => {
-            ThreadInlineImage({
-              src: url,
-              isDark: this.isDark,
-              fillFrame: true,
-              onAspect: (aspect: number): void => { this.gridAspectByUrl.set(url, aspect); }
-            })
+            Stack() {
+              // 提前挂载相邻图片，直接走图片缓存队列。外层始终保留，Swiper 页索引不变。
+              if (Math.abs(index - this.mainImageIndex) <= 1 || Math.abs(index - this.mainImageIndicatorIndex) <= 1) {
+                ThreadInlineImage({
+                  src: url,
+                  isDark: this.isDark,
+                  fillFrame: true,
+                  preloadPriority: index === this.mainImageIndex ? 1 : 0,
+                  onAspect: (aspect: number): void => { this.gridAspectByUrl.set(url, aspect); }
+                })
+              }
+            }
+              .width('100%')
+              .height('100%')
               .id(this.inlineImageNodeId('main', index))
               .accessibilityText(`查看主帖图片 ${index + 1}`)
               .onClick(() => { this.openInlineImage(url, 'main', index); })
@@ -4526,13 +4551,19 @@ struct ThreadDetail {
         .autoPlay(false)
         .indicator(false)
         .disableSwipe(images.length <= 1)
-        .cachedCount(1)
+        .onAnimationStart((_index: number, targetIndex: number) => {
+          this.mainImageIndicatorIndex = targetIndex;
+        })
         .onChange((index: number) => {
           this.mainImageIndex = index;
+          this.mainImageIndicatorIndex = index;
+        })
+        .onAnimationEnd((index: number) => {
+          this.mainImageIndicatorIndex = index;
         })
 
         if (images.length > 1) {
-          Text(`${this.mainImageIndex + 1}/${images.length}`)
+          Text(`${this.mainImageIndicatorIndex + 1}/${images.length}`)
             .id('thread_main_image_count')
             .fontSize(12)
             .fontColor(Color.White)
@@ -4552,7 +4583,8 @@ struct ThreadDetail {
             Circle()
               .width(6)
               .height(6)
-              .fill(index === this.mainImageIndex ? Theme.brand() : Theme.divider(this.isDark))
+              .fill(index === this.mainImageIndicatorIndex ? Theme.brand() : Theme.divider(this.isDark))
+              .id(`thread_main_image_dot_${index}`)
               .margin({ left: 3, right: 3, top: 2, bottom: 2 })
           }, (url: string, index: number): string => `${index}:${url}`)
         }
