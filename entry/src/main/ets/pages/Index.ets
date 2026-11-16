@@ -109,6 +109,7 @@ struct Index {
   @StorageLink('darkTick') @Watch('onDarkTick') darkTick: number = 0;
   @State isDark: boolean = false;
   @StorageLink('bottomBarBackdrop') bottomBarBackdrop: boolean = false;
+  @StorageLink('floatingPageBars') floatingPageBars: boolean = true;
   @State loggedIn: boolean = false;
   @State userName: string = '';
   @State userAvatar: string = '';
@@ -577,7 +578,7 @@ struct Index {
       if (this.privacyPhase >= 2) {
         // API26+ 沉浸材质生效范围仅限 Navigation 标题栏 / Tabs TabBar 槽位：
         // 支持时走真实 Tabs（底栏挂 tabBar，官方沉浸材质才渲染），其余走原手写叠放路径（与定稿一致，BottomBar 贴底悬浮）。
-        if (this.materialSupported && MaterialManager.getApiLevel() >= 26) {
+        if (this.floatingPageBars && this.materialSupported && MaterialManager.getApiLevel() >= 26) {
           this.FloatingTabsShell()
         } else {
           this.PagesStack()
@@ -1073,20 +1074,20 @@ struct Index {
       .height('100%')
       .padding({ left: 8, right: 8, top: this.padVVal(), bottom: this.padVVal() })
     }
-    .width(this.pillWidth())
+    .width(this.floatingPageBars ? this.pillWidth() : '100%')
     .height(this.barHeightVal())
     // 本分支仅 API<26 执行（26+ 走 FloatingTabsShell 槽位材质），此时 manualGlass 即兜底视觉
-    .backgroundColor(MaterialManager.isSupported() ? Color.Transparent : Theme.manualGlass(this.isDark))
-    .border({ width: 0.5, color: Theme.manualGlassBorder() })
-    .shadow(Theme.glassShadowStyle()).backgroundEffect(ImmBlur.bar())
-    .systemMaterial(ImmMaterial.bar())
-    .borderRadius(this.barRadiusVal())
+    .backgroundColor(this.floatingPageBars ? Theme.manualGlass(this.isDark) : Theme.bgCard(this.isDark))
+    .border({ width: this.floatingPageBars ? 0.5 : 0, color: Theme.manualGlassBorder() })
+    .backgroundEffect(this.floatingPageBars ? ImmBlur.bar() : undefined)
+    .systemMaterial(this.floatingPageBars ? ImmMaterial.bar() : ImmMaterial.empty())
+    .borderRadius(this.floatingPageBars ? this.barRadiusVal() : 0)
     .shadow({
       radius: 24,
       color: this.isDark ? '#55000000' : '#30101824',
       offsetY: 8
     })
-    .margin({ bottom: BAR_BOTTOM_MARGIN })
+    .margin({ bottom: this.floatingPageBars ? BAR_BOTTOM_MARGIN : 20 })
     .zIndex(20)
     // 沉浸阅读补全（2026-09-29）：兜底路径（API<26）无官方玻璃，直接下沉 + 淡出 + 禁用命中
     .translate({ y: this.barContentHidden ? this.barSinkY() : 0 })

@@ -67,7 +67,6 @@ const TOP_FADE_BAND_HEIGHT: number = 88;
  * true  = 「返回钮 / 吧名胶囊 / 分享钮」整行搬进 Navigation 的 title 槽位，玻璃交给官方沉浸材质 systemMaterial
  *         （官方口径：systemMaterial 生效区域仅 Navigation/NavDestination 标题栏、横向 Tabs(barPosition=End) 底部 TabBar；
  *          页面 body 内自绘浮层必判 Material inactive: out of scope）；
- *         与下方官方 Tabs 悬浮条（ImmersiveDockShell）合用后，本页即「上下两端官方槽位」齐备（§9.3 #6 目标形态）。
  * false = 回退改造前的页面主体悬浮顶栏（segGlass + backgroundBlurStyle 真磨砂兜底）。
  * ⚠️ 本页是二级路由页：搬槽位后系统侧滑返回 / 返回键需真机回归（§9.3 注记）。
  */
@@ -89,7 +88,7 @@ const FLOORS_FADE_IN_MS: number = 200;
 /** 2026-09-20（分区上屏）：楼层区淡入的启动延迟——楼主卡先落定，回复流随后进场 */
 const FLOORS_FADE_DELAY_MS: number = 120;
 
-const THREAD_DETAIL_FIXED_BAR_HEIGHT: number = 52;
+const THREAD_DETAIL_FIXED_BAR_HEIGHT: number = 44;
 const THREAD_REPLY_HEADER_HEIGHT: number = 38;
 
 /**
@@ -165,16 +164,6 @@ const IMMERSIVE_SHOW_SPRING_DAMPING: number = 0.86;
  * 顺带把位移量与各形态档几何解耦（原来一个 +200 余量把所有档都拉到同一个出屏量）。
  */
 const IMMERSIVE_FLY_SCALE: number = 0.6;
-/**
- * 沉浸阅读「玻璃侧」错帧编排（DT-N，2026-09-18 三轮，2026-09-19 回退 P-B′ 后恢复）：
- * 官方悬浮岛的玻璃由**系统**绘制（`barFloatingStyle.systemMaterial`），改参瞬时生效、应用层插不进动画，
- * 与槽内容（应用节点，180ms / 260ms）**不同步**。故把玻璃侧的「撤 / 给」与内容侧错开：
- * 藏起 = 内容先起步、玻璃晚撤 `IMMERSIVE_GLASS_LAG_MS`（撤玻璃那一刻槽内已不可见 ⇒ 空槽，硬切被藏住）；
- * 唤出 = 玻璃先给、内容延后 `IMMERSIVE_GLASS_LEAD_MS`（顺序不可反：内容先滑回时玻璃会在归位途中凭空出现）。
- */
-const IMMERSIVE_GLASS_LAG_MS: number = 180;
-const IMMERSIVE_GLASS_LEAD_MS: number = 16;
-
 /**
  * 楼中楼预览点赞补齐（§Z4a，2026-09-19）：
  * 首屏补齐延后起跑，让首屏渲染与下一页预取先占住连接池；补齐锁被占时按重试间隔轮询，
@@ -761,6 +750,26 @@ struct JumpTiebaDialogCard {
   }
 }
 
+class ThreadDockPillStyle implements AttributeModifier<RowAttribute> {
+  private isDark: boolean;
+  private useSystemMaterial: boolean;
+
+  constructor(isDark: boolean, useSystemMaterial: boolean) {
+    this.isDark = isDark;
+    this.useSystemMaterial = useSystemMaterial;
+  }
+
+  applyNormalAttribute(instance: RowAttribute): void {
+    instance
+      .backgroundColor(this.useSystemMaterial ? Color.Transparent : (this.isDark ? '#BF222328' : '#D9FFFFFF'))
+      .backgroundBlurStyle(this.useSystemMaterial ? BlurStyle.NONE : BlurStyle.Regular)
+      .systemMaterial(this.useSystemMaterial ? ImmMaterial.floatingBarFlat() : undefined)
+      .borderRadius(Radius.full)
+      .border({ width: 0.5, color: Theme.manualGlassBorder() })
+      .shadow({ radius: 10, color: this.isDark ? '#33000000' : '#16000000', offsetY: 2 });
+  }
+}
+
 @Entry
 @Component
 struct ThreadDetail {
@@ -1008,17 +1017,7 @@ struct ThreadDetail {
    * 分支渲染统一读本状态（不再直接调 splitMode()），保证一次旋转只切一次。
    */
   @State isSplit: boolean = false;
-  // API26+ 真机沉浸光感：materialSupported 为 true 时 build 走官方 Tabs 悬浮条壳（底部 Dock 整体入
-  // .tabBar() 槽位，材质由 barFloatingStyle.systemMaterial 悬浮条本体渲染）；其余走原手写叠放路径。
   @State materialSupported: boolean = false;
-  /**
-   * 官方悬浮条首帧重排触发（2026-09-13；P-B′ 期间随 barFloatingStyle 一并移除，2026-09-19 回退恢复）：
-   * 官方悬浮条存在首帧时序问题 —— 首次进入时槽内内容不随岛视觉居中（点赞/收藏/跳转/发送整体偏上、
-   * 参差），**旋转一下触发系统重排后才正常**（用户真机复现）。修复 = 进页后对 `barBottomMargin`
-   * 施加一次 0.5vp 微变（视觉不可察），模拟旋转的「布局参数变化 → 系统重排悬浮条」。
-   * 手机同样会 nudge 一次，0.5vp 无感；若 300ms 不够（数据慢）可再调时机。
-   */
-  @State dockNudge: number = 0;
   // ===== 「帖子沉浸式阅读」（设置 → 个性化，2026-09-18）=====
   /** 设置项真源：AppStorage `immersiveReading`（UsageHabitsManager 冷启动恢复 / 设置页写入），默认关 */
   @StorageLink('immersiveReading') @Watch('onImmersiveReadingChanged') immersiveReading: boolean = false;
@@ -1034,15 +1033,6 @@ struct ThreadDetail {
   private immersiveLastY: number = 0;
   /** 滚动位置是否已初始化（首帧只记录不判定，避免拿别处残留值算增量） */
   private immersiveLastReady: boolean = false;
-  /**
-   * 玻璃侧独立状态位（DT-N）：与内容侧 `immersiveHidden` **不同步**，只驱动 `barFloatingStyle` 的
-   * `barWidth`（隐藏态收 0 ⇒ 胶囊无面积 ⇒ 系统不渲染玻璃）。错帧时机见 hideImmersive / showImmersive。
-   */
-  @State immersiveGlassHidden: boolean = false;
-  /** 玻璃侧延时器句柄（setTimeout 返回值，-1 = 空闲）：重排前与退页时清理 */
-  private immersiveGlassTimer: number = -1;
-  /** 唤出幂等位：置顶保护分支每帧都会调 showImmersive，防止把内容无限顺延（回顶后要等弹跳结束才回来） */
-  private immersiveShowPending: boolean = false;
   // 壳分支悬浮岛宽度依赖的屏宽（onAreaChange 实时更新）
   @State currentWidth: number = 360;
   // ===== 平板适配（docs/TiebaPura平板适配.md §4.9）=====
@@ -1104,10 +1094,6 @@ struct ThreadDetail {
         this.skeletonShownAt = Date.now();
       }
     }, 120);
-    // 首帧重排触发（2026-09-13，回退 P-B′ 后恢复）：300ms = 首帧布局已稳定、且早于用户读完内容。
-    setTimeout(() => {
-      this.dockNudge = 1;
-    }, 300);
     const params = this.getUIContext().getRouter().getParams() as Record<string, string>;
     if (params && params.tid) {
       this.tid = `${params.tid}`;
@@ -2105,14 +2091,12 @@ struct ThreadDetail {
           bottomColor: Theme.bgCard(this.isDark),
           content: () => { this.FixedDetailContent(); }
         })
-      } else if (this.materialSupported) {
-        this.ImmersiveDockShell()
       } else {
         this.ContentLayer()
         if (this.bottomBarBackdrop && !this.immersiveHidden) {
           BottomBarBackdrop({ heightVp: this.dockPillHeight() + this.dockBottomMargin() + 16, isDark: this.isDark })
         }
-        this.BottomDock()
+        this.BottomDockShell()
       }
       Column()
         .width(0)
@@ -2271,7 +2255,7 @@ struct ThreadDetail {
       }
       .width('100%')
       .layoutWeight(1)
-      this.CommentBar(false)
+      this.CommentBar()
     }
     .width('100%')
     .height('100%')
@@ -2282,7 +2266,6 @@ struct ThreadDetail {
       // 官方槽位路径：Navigation + 自定义 title（height 固定 98，与改造前悬浮顶栏几何一致）
       // barStyle STACK：内容区延伸到标题栏之下（官方建议，标题栏材质获得最佳沉浸体验的前提）
       // backgroundColor 显式透明：避免标题栏自带底色压住滚动经过的内容
-      // 与下方 ImmersiveDockShell 的 Tabs 悬浮条合起来 =「顶部 titleBar + 底部 Tabs」两端官方槽位齐备
       Navigation() {
         this.DetailRoot()
       }
@@ -2547,58 +2530,19 @@ struct ThreadDetail {
     }
   }
 
-  /**
-   * 藏起（DT-N 错帧编排，2026-09-19 回退 P-B′ 后恢复）：内容**立即**起步（180ms EaseIn 收回），
-   * 玻璃**晚撤** `IMMERSIVE_GLASS_LAG_MS`(180ms) —— 撤玻璃那一刻槽内已 `opacity(0)` + 位移到位 =
-   * 空槽，系统那一记「无过渡硬切」被藏到不可见之后（P-B′ 之前的同帧撤玻璃 = 玻璃抢跑，硬切格外显眼）。
-   */
   private hideImmersive(): void {
-    this.clearImmersiveGlassTimer();
-    this.immersiveShowPending = false;
     this.immersiveHidden = true;
-    this.immersiveGlassTimer = setTimeout(() => {
-      this.immersiveGlassTimer = -1;
-      this.immersiveGlassHidden = true;
-    }, IMMERSIVE_GLASS_LAG_MS);
   }
 
-  /**
-   * 唤出（隐藏过程的反向）：**先给玻璃**，下一帧（`IMMERSIVE_GLASS_LEAD_MS` = 16）再放内容滑回
-   * （260ms + springMotion 轻回弹）。顺序不可反：内容先滑回时玻璃会在归位途中凭空出现，那一帧的
-   * 「内容悬空」更扎眼。幂等：已是可见态直接返回；`immersiveShowPending` 防置顶保护分支每帧调用
-   * 把内容无限顺延（症状：回顶后要等弹跳结束才滑回来）。
-   */
   private showImmersive(): void {
-    if (!this.immersiveHidden) {
-      return;
-    }
-    this.immersiveGlassHidden = false;
-    if (this.immersiveShowPending) {
-      return;
-    }
-    this.immersiveShowPending = true;
-    this.clearImmersiveGlassTimer();
-    this.immersiveGlassTimer = setTimeout(() => {
-      this.immersiveGlassTimer = -1;
-      this.immersiveShowPending = false;
-      this.immersiveHidden = false;
-    }, IMMERSIVE_GLASS_LEAD_MS);
+    this.immersiveHidden = false;
   }
 
-  /** 清理玻璃侧延时器（hideImmersive / showImmersive 重排前 + aboutToDisappear 退页时调用） */
-  private clearImmersiveGlassTimer(): void {
-    if (this.immersiveGlassTimer !== -1) {
-      clearTimeout(this.immersiveGlassTimer);
-      this.immersiveGlassTimer = -1;
-    }
-  }
-
-  /** 退页清理：藏起 180ms / 唤出 16ms 窗口内退出本页时，延时回调不再落到已销毁的组件上 */
+  /** 退页清理 */
   aboutToDisappear(): void {
     // §AUDIT（2026-09-29 定时器审计）：存活守卫——无句柄的延时链回调（自动开楼中楼/滚动重试/
     // 淡入接力/点赞补齐等）以本标志短路，销毁后不再写 @State / 调路由 / 发请求
     this.pageAlive = false;
-    this.clearImmersiveGlassTimer();
     // 尾部提示延时器同理：预取在途时退页，1.2s 后的浮出回调不能落到已销毁的组件上
     this.clearLoadingHintTimer();
     // §Z4a 延后补齐调度器同理：延后/重试窗口内退页，回调不能再落到已销毁的组件上
@@ -2647,76 +2591,6 @@ struct ThreadDetail {
    *   28 = 单枚胶囊左右 padding 2×14；2 × fs(12) = 正序/倒序两字宽；+12 余量同前。
    * 结果：标准字号 64、极大字号(1.35) 67，死区进一步收窄。
    */
-  /** API26+ 悬浮玻璃路径：真实 Tabs 单内容承载页叠层，底部 Dock 放入 .tabBar() 槽位
-   *  （引擎认可 tabBar 槽位属于 TabBar 生效范围，悬浮条本体挂官方材质） */
-  @Builder
-  ImmersiveDockShell() {
-    Tabs({ barPosition: BarPosition.End }) {
-      TabContent() {
-        this.ContentLayer()
-      }
-      .tabBar(this.FloatingDock())
-    }
-    .width('100%')
-    .height('100%')
-    .vertical(false)
-    .scrollable(false)
-    .barOverlap(true)
-    .barHeight(this.dockPillHeight())
-    .barBackgroundColor(Color.Transparent)
-    .barBackgroundBlurStyle(this.bottomBarBackdrop && !this.immersiveGlassHidden
-      ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE)
-    // 沉浸阅读（DT-M 杠杆① / DT-N 玻璃侧状态位）：隐藏态把胶囊宽度收 0 ⇒ 零面积 ⇒ 系统玻璃无从渲染；
-    // barWidth 与 barBottomMargin 同层同源，响应式生效已由既有 dockNudge 机制验证。
-    // ⚠️ 已知遗留（根因未解）：系统侧胶囊有最小宽地板（A1 实测宽 56），隐藏态会残留一枚小胶囊（文档 §4.9「遗留」）。
-    .barFloatingStyle({
-      barWidth: {
-        smallBarWidth: this.immersiveGlassHidden ? 0 : this.dockPillWidth(),
-        mediumBarWidth: this.immersiveGlassHidden ? 0 : this.dockPillWidth(),
-        largeBarWidth: this.immersiveGlassHidden ? 0 : this.dockPillWidth()
-      },
-      // 首帧重排触发（2026-09-13）：见 dockNudge 声明处的说明，0.5vp 微变触发系统重排悬浮条。
-      barBottomMargin: this.dockBottomMargin() + this.dockNudge * 0.5,
-      maskColor: this.bottomBarBackdrop && !this.immersiveGlassHidden
-        ? (this.isDark ? '#99000000' : '#CCF1F3F5') : Color.Transparent,
-      maskHeight: this.bottomBarBackdrop && !this.immersiveGlassHidden ? this.dockPillHeight() + this.dockBottomMargin() + 16 : 0,
-      // 沉浸阅读隐藏态（DT-P / 实验 L1，2026-09-19）：换官方「空材质」⇒ 悬浮条的材质层不再渲染。
-      // 与 P-B 的「撤材质（不传 / 传 undefined）」是两条路 —— 后者是「不设置」，系统回落自己的
-      // 默认材质（真机实测 = 一层白背板）；本档是显式「关材质」，官方语义即「无材质效果」。
-      // 隐藏态 barWidth 收 0 仍被系统最小宽地板钳住（约 56px）留一枚空壳，但空壳此刻无材质可画。
-      // 判读：胶囊彻底消失 = L1 成立；若反而出现更大白板 = 白底是悬浮条自身默认背景 → 转 L2。
-      systemMaterial: this.immersiveGlassHidden ? ImmMaterial.empty() : ImmMaterial.floatingBar()
-    })
-    .backgroundColor(Color.Transparent)
-    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    .clip(false)
-  }
-
-  /**
-   * 官方悬浮岛（tabBar 槽位）= 评论条内容层。**玻璃由系统侧渲染**（`barFloatingStyle.systemMaterial`），
-   * 槽宽也由系统按 `barWidth`（= `dockPillWidth()`）约束 —— 平板等宽屏下岛内元素照样收在岛宽内。
-   * 2026-09-19：P-B′「自绘玻璃岛」按用户要求回退（平板出问题），恢复系统侧玻璃 + DT-N 错帧编排。
-   * 回退主因记录：P-B′ 期间槽内容变成「全宽铺开、靠 CommentBar 自身居中」，宽屏下与岛宽脱钩 →
-   * 平板岛内元素铺到屏宽两侧；且玻璃改由应用层绘制后，沉浸隐藏的错帧编排一并失效。
-   */
-  @Builder
-  FloatingDock() {
-    Column() {
-      this.CommentBar(true)
-    }
-    .width('100%')
-    .height('100%')
-    // 官方槽位可能在首帧包含额外安全区空间，评论条始终在槽位内居中。
-    .justifyContent(FlexAlign.Center)
-    .padding({ left: 8, right: 8 })
-    // 沉浸阅读（DT-N）：内容侧下沉 + 淡出 + 禁用命中（玻璃侧错帧由 hideImmersive / showImmersive 编排）
-    .translate({ y: this.immersiveHidden ? this.immersiveBottomSink() : 0 })
-    .opacity(this.immersiveHidden ? 0 : 1)
-    // opacity 0 的组件仍参与命中测试，必须显式禁用，避免「看不见但能点到点赞/收藏/发送」
-    .enabled(!this.immersiveHidden)
-    .animation(this.immersiveAnim())
-  }
-
   @Builder
   DetailTopBar(inSlot: boolean) {
     Row({ space: 3 }) {
@@ -2993,16 +2867,85 @@ struct ThreadDetail {
   }
 
   @Builder
-  BottomDock() {
+  BottomDockShell() {
     Column() {
-      this.CommentBar(false)
+      if (this.materialSupported) {
+        Tabs({ barPosition: BarPosition.End }) {
+          TabContent().tabBar(this.BottomDock(true))
+        }
+        .width(this.dockPillWidth())
+        .height(this.dockPillHeight())
+        .barHeight(this.dockPillHeight())
+        .vertical(false)
+        .scrollable(false)
+        .barBackgroundColor(Color.Transparent)
+        .barBackgroundBlurStyle(BlurStyle.NONE)
+        .backgroundColor(Color.Transparent)
+        .clip(false)
+        .hitTestBehavior(HitTestMode.None)
+      } else {
+        this.BottomDock(false)
+      }
     }
-    .width('100%')
-    .align(Alignment.Bottom)
+    .margin({ bottom: this.dockBottomMargin() })
     .translate({ y: this.immersiveHidden ? this.immersiveBottomSink() : 0 })
     .opacity(this.immersiveHidden ? 0 : 1)
     .enabled(!this.immersiveHidden)
     .animation(this.immersiveAnim())
+    .hitTestBehavior(HitTestMode.None)
+  }
+
+  @Builder
+  BottomDock(useSystemMaterial: boolean) {
+    Row({ space: 14 }) {
+      Row({ space: 6 }) {
+        SymbolGlyph($r('sys.symbol.square_and_pencil'))
+          .fontSize(18)
+          .fontColor([Theme.textPrimary(this.isDark)])
+        Text('写评论')
+          .fontSize(fs(14, this.fontScale))
+          .fontColor(Theme.textPrimary(this.isDark))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .layoutWeight(5)
+      .height('100%')
+      .justifyContent(FlexAlign.Center)
+      .alignItems(VerticalAlign.Center)
+      .attributeModifier(new ThreadDockPillStyle(this.isDark, useSystemMaterial))
+      .id('thread_reply_entry')
+      .accessibilityText('写评论')
+      .enabled(!this.sending && this.detail !== null)
+      .onClick(() => { this.openReplyEditor(); })
+
+      Row() {
+        this.ThreadLikeAction()
+        this.ThreadReplyJumpAction()
+        this.ThreadCollectAction()
+        Column({ space: 1 }) {
+          this.CommentBarIcon($r('sys.symbol.share'), $r('sys.color.icon_primary'), 'thread_dock_share_icon')
+          Text('分享')
+            .fontSize(fs(10, this.fontScale))
+            .fontColor(Theme.textSecondary(this.isDark))
+        }
+        .layoutWeight(1)
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .id('thread_dock_share')
+        .accessibilityText('分享帖子')
+        .onClick(() => { this.shareThread(this.buildSharePayload()); })
+      }
+      .layoutWeight(7)
+      .height('100%')
+      .padding({ left: 4, right: 4 })
+      .alignItems(VerticalAlign.Center)
+      .attributeModifier(new ThreadDockPillStyle(this.isDark, useSystemMaterial))
+      .id('thread_dock_actions')
+    }
+    .id('thread_comment_bar')
+    .width(this.dockPillWidth())
+    .height(this.dockPillHeight())
+    .hitTestBehavior(HitTestMode.None)
   }
 
   // 点赞请求进行中标志：防止连点产生"点赞→立即取消"连环请求（贴吧对该模式限流，报 3280001）
@@ -5157,7 +5100,7 @@ struct ThreadDetail {
   }
 
   @Builder
-  CommentBar(inIsland: boolean) {
+  CommentBar() {
     Row({ space: 4 }) {
       Row() {
         Text('发贴千百度 文明第一步')
@@ -5169,73 +5112,85 @@ struct ThreadDetail {
       .layoutWeight(1)
       .height(34)
       .padding({ left: 10, right: 8 })
+      .backgroundColor(this.isDark ? '#292A30' : '#F1F2F6')
+      .borderRadius(Radius.full)
       .alignItems(VerticalAlign.Center)
       .id('thread_reply_entry')
       .accessibilityText('回复帖子')
       .enabled(!this.sending && this.detail !== null)
       .onClick(() => { this.openReplyEditor(); })
 
-      Column({ space: 1 }) {
-        this.CommentBarIcon($r('sys.symbol.ellipsis_message_1'), $r('sys.color.icon_primary'), 'thread_reply_icon')
-        Text(this.formatEngagementCount(this.detail?.replyNum ?? 0))
-          .fontSize(fs(10, this.fontScale))
-          .fontColor(Theme.textSecondary(this.isDark))
-      }
-      .width(39)
-      .height(this.floatingPageBars ? '100%' : 40)
-      .justifyContent(FlexAlign.Center)
-      .id('thread_reply_jump')
-      .accessibilityText('查看全部回复')
-      .onClick(() => { this.scrollToReplies(); })
-
-      Column({ space: 1 }) {
-        this.CommentBarIcon($r('sys.symbol.hand_thumbsup'),
-          this.liked ? Theme.brand() : $r('sys.color.icon_primary'), 'thread_like_icon')
-        Text(this.formatEngagementCount(this.detail?.likeCount ?? 0))
-          .fontSize(fs(10, this.fontScale))
-          .fontColor(this.liked ? Theme.brand() : Theme.textSecondary(this.isDark))
-      }
-      .width(39)
-      .height(this.floatingPageBars ? '100%' : 40)
-      .justifyContent(FlexAlign.Center)
-      .id('thread_like')
-      .accessibilityText(this.liked ? '取消点赞' : '点赞')
-      .onClick(() => { this.toggleLike(); })
-
-      Column({ space: 1 }) {
-        this.CommentBarIcon($r('sys.symbol.star'),
-          this.collected ? Theme.brand() : $r('sys.color.icon_primary'), 'thread_collect_icon')
-        if (this.floatingPageBars || this.detail?.collectCount !== undefined) {
-          Text(this.formatEngagementCount(this.detail?.collectCount ?? 0))
-            .id('thread_collect_count')
-            .fontSize(fs(10, this.fontScale))
-            .fontColor(this.collected ? Theme.brand() : Theme.textSecondary(this.isDark))
-            .visibility(this.detail?.collectCount === undefined ? Visibility.Hidden : Visibility.Visible)
-        }
-      }
-      .width(39)
-      .height(this.floatingPageBars ? '100%' : 40)
-      .justifyContent(FlexAlign.Center)
-      .id('thread_collect')
-      .accessibilityText(this.collected ? '取消收藏，长按收藏并归类' : '收藏，长按收藏并归类')
-      .onClick(() => {
-        this.collected = !this.collected;
-        this.persistPersonalState(CACHE_KEY.PERSONAL_COLLECTED, this.collected);
-      })
-      .gesture(LongPressGesture({ fingers: 1, repeat: false, duration: 350 })
-        .onAction(() => { this.openCategoryPicker(); }))
+      this.ThreadReplyJumpAction()
+      this.ThreadLikeAction()
+      this.ThreadCollectAction()
     }
-    .width(this.floatingPageBars && !inIsland ? this.dockPillWidth() : '100%')
-    .height(inIsland ? '100%' : (this.floatingPageBars ? this.dockPillHeight() : THREAD_DETAIL_FIXED_BAR_HEIGHT))
+    .width('100%')
+    .height(THREAD_DETAIL_FIXED_BAR_HEIGHT)
     .id('thread_comment_bar')
-    .padding({ left: inIsland ? 1 : 12, right: inIsland ? 1 : 8 })
+    .padding({ left: 12, right: 8 })
     .alignItems(VerticalAlign.Center)
-    .backgroundColor(this.floatingPageBars
-      ? (inIsland ? Color.Transparent : Theme.segGlass(this.isDark, false))
-      : Theme.bgCard(this.isDark))
-    .backgroundBlurStyle(this.floatingPageBars && !inIsland ? BlurStyle.Regular : BlurStyle.NONE)
-    .border({ width: this.floatingPageBars && !inIsland ? 0.5 : 0, color: Theme.manualGlassBorder() })
-    .borderRadius(this.floatingPageBars ? Radius.full : 0)
-    .margin({ bottom: this.floatingPageBars && !inIsland ? this.dockBottomMargin() : 0 })
+    .backgroundColor(Theme.bgCard(this.isDark))
+  }
+
+  @Builder
+  ThreadReplyJumpAction() {
+    Column({ space: 1 }) {
+      this.CommentBarIcon($r('sys.symbol.ellipsis_message_1'), $r('sys.color.icon_primary'), 'thread_reply_icon')
+      Text(this.formatEngagementCount(this.detail?.replyNum ?? 0))
+        .fontSize(fs(10, this.fontScale))
+        .fontColor(Theme.textSecondary(this.isDark))
+    }
+    .width(this.floatingPageBars ? undefined : 39)
+    .layoutWeight(this.floatingPageBars ? 1 : 0)
+    .height(this.floatingPageBars ? '100%' : 40)
+    .justifyContent(FlexAlign.Center)
+    .id('thread_reply_jump')
+    .accessibilityText('查看全部回复')
+    .onClick(() => { this.scrollToReplies(); })
+  }
+
+  @Builder
+  ThreadLikeAction() {
+    Column({ space: 1 }) {
+      this.CommentBarIcon($r('sys.symbol.hand_thumbsup'),
+        this.liked ? Theme.brand() : $r('sys.color.icon_primary'), 'thread_like_icon')
+      Text(this.formatEngagementCount(this.detail?.likeCount ?? 0))
+        .fontSize(fs(10, this.fontScale))
+        .fontColor(this.liked ? Theme.brand() : Theme.textSecondary(this.isDark))
+    }
+    .width(this.floatingPageBars ? undefined : 39)
+    .layoutWeight(this.floatingPageBars ? 1 : 0)
+    .height(this.floatingPageBars ? '100%' : 40)
+    .justifyContent(FlexAlign.Center)
+    .id('thread_like')
+    .accessibilityText(this.liked ? '取消点赞' : '点赞')
+    .onClick(() => { this.toggleLike(); })
+  }
+
+  @Builder
+  ThreadCollectAction() {
+    Column({ space: 1 }) {
+      this.CommentBarIcon($r('sys.symbol.star'),
+        this.collected ? Theme.brand() : $r('sys.color.icon_primary'), 'thread_collect_icon')
+      if (this.floatingPageBars || this.detail?.collectCount !== undefined) {
+        Text(this.formatEngagementCount(this.detail?.collectCount ?? 0))
+          .id('thread_collect_count')
+          .fontSize(fs(10, this.fontScale))
+          .fontColor(this.collected ? Theme.brand() : Theme.textSecondary(this.isDark))
+          .visibility(this.detail?.collectCount === undefined ? Visibility.Hidden : Visibility.Visible)
+      }
+    }
+    .width(this.floatingPageBars ? undefined : 39)
+    .layoutWeight(this.floatingPageBars ? 1 : 0)
+    .height(this.floatingPageBars ? '100%' : 40)
+    .justifyContent(FlexAlign.Center)
+    .id('thread_collect')
+    .accessibilityText(this.collected ? '取消收藏，长按收藏并归类' : '收藏，长按收藏并归类')
+    .onClick(() => {
+      this.collected = !this.collected;
+      this.persistPersonalState(CACHE_KEY.PERSONAL_COLLECTED, this.collected);
+    })
+    .gesture(LongPressGesture({ fingers: 1, repeat: false, duration: 350 })
+      .onAction(() => { this.openCategoryPicker(); }))
   }
 }

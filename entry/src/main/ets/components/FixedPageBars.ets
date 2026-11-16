@@ -6,6 +6,7 @@ export struct FixedPageBars {
   @BuilderParam content: () => void = this.emptyContent;
   @Prop topColor: ResourceColor = Color.White;
   @Prop bottomColor: ResourceColor = Color.White;
+  @Prop reserveBottom: boolean = true;
   @State topInset: number = 44;
   @State bottomInset: number = 12;
   private mounted: boolean = true;
@@ -45,7 +46,9 @@ export struct FixedPageBars {
       .width('100%')
       .layoutWeight(1)
       .clip(true)
-      Column().width('100%').height(this.bottomInset).backgroundColor(this.bottomColor)
+      if (this.reserveBottom) {
+        Column().width('100%').height(this.bottomInset).backgroundColor(this.bottomColor)
+      }
     }
     .width('100%')
     .height('100%')

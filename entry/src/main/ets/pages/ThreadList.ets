@@ -3979,6 +3979,7 @@ struct ThreadList {
       FixedPageBars({
         topColor: this.searchMode ? Theme.bg(this.isDark) : this.forumHeaderColor(),
         bottomColor: Theme.bg(this.isDark),
+        reserveBottom: false,
         content: () => { this.FixedForumContent(); }
       })
     } else if (THREAD_LIST_OFFICIAL_TITLE_BAR && this.materialSupported) {
@@ -4020,7 +4021,22 @@ struct ThreadList {
 
   private forumHeaderColor(): string {
     const theme: string = (this.isDark ? this.forumInfo?.darkHeaderColor : this.forumInfo?.headerColor) ?? '';
-    return this.forumArtColor || theme || (this.isDark ? '#2C3B49' : '#3D5061');
+    if (this.forumArtColor.length > 0) {
+      return this.forumArtColor;
+    }
+    if (theme.length === 0) {
+      return this.isDark ? '#2C3B49' : '#3D5061';
+    }
+    if (!this.forumInfo?.headerImage) {
+      const red = parseInt(theme.slice(1, 3), 16);
+      const green = parseInt(theme.slice(3, 5), 16);
+      const blue = parseInt(theme.slice(5, 7), 16);
+      const brightness = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+      if (brightness < 40 && Math.max(red, green, blue) < 65) {
+        return this.isDark ? '#3B424B' : '#465562';
+      }
+    }
+    return theme;
   }
 
   private isForumHeaderCollapsed(): boolean {
