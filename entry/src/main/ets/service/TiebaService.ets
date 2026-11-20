@@ -2420,17 +2420,26 @@ export class TiebaService {
     const comments: CommentItem[] = subPosts.map((subPost: SubPostListMessage, index: number): CommentItem =>
       this.mapSubPostComment(subPost, normalizedPid, index)
     );
+    // pb/floor 通常只返回 currentPage / totalPage，省略 hasMore；缺省值不能当作末页。
+    const pagination = data?.page;
+    const total: number = Math.max(comments.length, pagination?.totalCount ?? 0);
+    const totalPages: number = pagination?.totalPage ?? 0;
+    const currentPage: number = pagination?.currentPage ?? page;
+    const hasMore: boolean = comments.length > 0 && (totalPages > 0
+      ? currentPage < totalPages
+      : pagination?.hasMore !== undefined ? pagination.hasMore === 1
+        : comments.length >= (pagination?.pageSize || 30));
     parent.comments = comments;
-    parent.commentsTotal = comments.length;
-    parent.commentsHasMore = data?.page?.hasMore === 1;
+    parent.commentsTotal = total;
+    parent.commentsHasMore = hasMore;
     return {
       tid: normalizedTid,
       floorId: normalizedPid,
       floor: parent.floor,
       parent,
       comments,
-      total: comments.length,
-      hasMore: data?.page?.hasMore === 1,
+      total,
+      hasMore,
     };
   }
 
@@ -3067,7 +3076,7 @@ export class TiebaService {
       comments: [],
       commentsTotal: commentCount,
       commentsHasMore: false,
-      level: this.deriveLevel(authorIdStr, authorName),
+      level: author?.levelId ?? 0,
       ipLocation: '',
     };
   }
@@ -3216,7 +3225,7 @@ export class TiebaService {
       floor: subPost.floor,
       createTime: formatTime(subPost.time ?? ''),
       isAuthor: false,
-      level: this.deriveLevel(authorIdStr, authorName),
+      level: author?.levelId ?? 0,
       // 修复点赞数据解析：与主楼层 mapFloorPost 一致，先嵌套 agree 后顶层独立字段双重 fallback
       likeCount: Number(subPost.agree?.agreeNum ?? subPost.agreeNum ?? 0),
       isLiked: Number(subPost.agree?.hasAgree ?? subPost.hasAgree ?? 0) === 1 || Number(subPost.agree?.agreeType ?? 0) > 0,
@@ -3449,7 +3458,8 @@ export class TiebaService {
             avatar: subPost.author?.bimgUrl,
             bimg_url: subPost.author?.bimgUrl,
             new_icon_url: subPost.author?.newIconUrl?.[0],
-            newIconUrl: subPost.author?.newIconUrl?.[0]
+            newIconUrl: subPost.author?.newIconUrl?.[0],
+            levelId: subPost.author?.levelId
           }
         ),
         author_id: subPost.authorId ?? subPost.author?.id,
@@ -3660,7 +3670,7 @@ export class TiebaService {
           floor: comment.floor,
           createTime: formatTime(comment.time ?? ''),
           isAuthor: commentAuthor !== '贴吧用户' && commentAuthor === author,
-          level: this.deriveLevel(commentAuthorId, commentAuthor),
+          level: comment.author?.levelId ?? 0,
           likeCount: clampLike(Number(comment.agree?.agreeNum ?? comment.agree?.agree_num ?? 0)),
           isLiked: Number(comment.agree?.hasAgree ?? comment.agree?.has_agree ?? comment.agree?.agreeType ?? 0) > 0,
         };
@@ -3694,7 +3704,7 @@ export class TiebaService {
         commentsTotal: clampSub(Number(record.sub_post_number ?? 0)) || comments.length,
         // 若sub_post_number > 实际已加载 comments 长度，则还有更多
         commentsHasMore: clampSub(Number(record.sub_post_number ?? 0)) > comments.length,
-        level: Number(record.author?.levelId ?? 0) || this.deriveLevel(`${record.author_id ?? record.author?.id ?? ''}`, floorAuthor),
+        level: record.author?.levelId ?? 0,
         ipLocation: '',
       });
     }
@@ -3794,7 +3804,8 @@ export class TiebaService {
       avatar_url: firstText(primary?.avatar_url, fallback?.avatar_url),
       bimg_url: firstText(primary?.bimg_url, fallback?.bimg_url),
       new_icon_url: firstText(primary?.new_icon_url, fallback?.new_icon_url),
-      newIconUrl: firstText(primary?.newIconUrl, fallback?.newIconUrl)
+      newIconUrl: firstText(primary?.newIconUrl, fallback?.newIconUrl),
+      levelId: fallback?.levelId ?? primary?.levelId
     };
   }
 
@@ -3966,19 +3977,6 @@ export class TiebaService {
       avatar: `${best.bimgUrl ?? ''}`,
       new_icon_url: best.newIconUrl?.[0],
     };
-  }
-
-  /**
-   * 根据用户ID/名称推导一个稳定的等级值 (1-20)
-   * 贴吧API不直接返回楼层作者等级，用hash生成伪随机但稳定的等级
-   */
-  private deriveLevel(userId: string, userName: string): number {
-    const seed = (userId.length > 0 ? userId : userName).toString();
-    let hash = 0;
-    for (let i = 0; i < seed.length; i++) {
-      hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
-    }
-    return Math.abs(hash) % 20 + 1;
   }
 
   private normalizeAvatar(author?: ModernAuthorRecord): string {
@@ -8024,7 +8022,7 @@ export class TiebaService {
           isAuthor: floorAuthor === author,
           likeCount: rawLike ? parseInt(rawLike, 10) : 0,
           isLiked: rawAgreeStatus ? parseInt(rawAgreeStatus, 10) === 1 : false,
-          level: this.deriveLevel('', floorAuthor),
+          level: 0,
           ipLocation: '',
         });
       }

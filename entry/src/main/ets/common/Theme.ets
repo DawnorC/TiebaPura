@@ -700,12 +700,12 @@ export class Theme {
   // 成功色
   static success(): string { return '#52C41A'; }
 
-  // 用户等级徽章色：贴吧官方 18 级（1-3 绿 / 4-9 蓝 / 10-14 红 / 15-18 黄）
+  // 吧内等级徽章色：1-3 青绿 / 4-9 蓝 / 10-15 橙 / 16-18 深橙。
   static levelColor(level: number): string {
-    if (level >= 15) return '#FFC107';
-    if (level >= 10) return '#F44336';
-    if (level >= 4) return '#2196F3';
-    return '#4CAF50';
+    if (level >= 16) return '#FF9C19';
+    if (level >= 10) return '#FFA126';
+    if (level >= 4) return '#3AA7E9';
+    return '#2FBEAB';
   }
 
   // ========== 手动玻璃兜底（低版本 API 23~25 / 材质范围外 / 材质渲染失败时）==========

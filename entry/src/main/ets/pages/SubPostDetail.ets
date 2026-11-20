@@ -55,6 +55,7 @@ export struct SubPostReplyPanel {
   @State parentLiked: boolean = false;
   @State parentLikeCount: number = 0;
   @State commentsState: CommentItem[] = [];
+  @State commentsTotal: number = 0;
   @State loading: boolean = false;
   @State hasMore: boolean = true;
   @State errorMsg: string = '';
@@ -184,6 +185,7 @@ export struct SubPostReplyPanel {
       });
       this.page++;
       this.commentsState = [...this.commentsState, ...added];
+      this.commentsTotal = result.total;
       this.hasMore = result.hasMore && added.length > 0;
       return true;
     } catch (e) {
@@ -289,6 +291,24 @@ export struct SubPostReplyPanel {
               ErrorView({ message: this.errorMsg, onRetry: () => { this.loadNextPage(); } }).height(120)
             } else if (!this.hasMore && this.commentsState.length === 0) {
               EmptyView({ message: '当前楼层暂无回复' }).height(120)
+            } else if (this.hasMore) {
+              Text('已加载' + this.commentsState.length + '条回复，点击加载更多')
+                .fontSize(fs(13, this.fontScale))
+                .fontColor(Theme.textSecondary(this.isDark))
+                .width('100%')
+                .height(56)
+                .textAlign(TextAlign.Center)
+                .id('subpost_load_more')
+                .onClick(() => { this.loadNextPage(); })
+            } else {
+              Text('已加载' + this.commentsState.length + '条回复' +
+                (this.commentsTotal > this.commentsState.length ? '，部分回复暂不可见' : '，没有更多了'))
+                .fontSize(fs(13, this.fontScale))
+                .fontColor(Theme.textTertiary(this.isDark))
+                .width('100%')
+                .height(48)
+                .textAlign(TextAlign.Center)
+                .id('subpost_load_complete')
             }
           }
           .width('100%')
